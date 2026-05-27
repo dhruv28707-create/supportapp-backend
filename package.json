@@ -12,6 +12,8 @@
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "node-fetch": "^2.6.9"
+    "firebase-admin": "^13.9.0",
+    "node-fetch": "^2.6.9",
+    "razorpay": "^2.9.6"
   }
 }

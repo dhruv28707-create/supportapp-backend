@@ -8,6 +8,7 @@ const razorpay = new Razorpay({
 
 const TIER_PRICES = {
   pro: 9900, // ₹99 in paise
+  ultimate: 19900, // ₹199 in paise
 };
 
 module.exports = async (req, res) => {
