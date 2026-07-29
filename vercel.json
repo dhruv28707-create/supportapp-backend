@@ -2,6 +2,8 @@
   "version": 2,
   "routes": [
     { "src": "/chat", "dest": "/api/chat.js" },
+    { "src": "/api/payment-order", "dest": "/api/payment-order.js" },
+    { "src": "/api/payment-verify", "dest": "/api/payment-verify.js" },
     { "src": "/", "dest": "/api/index.js" }
   ]
 }

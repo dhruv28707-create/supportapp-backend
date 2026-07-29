@@ -85,10 +85,12 @@ module.exports = async (req, res) => {
 
     // Subscription expires in 30 days
     const expiresAt = new Date();
-    expiresAt.setDate(
-      expiresAt.getDate() + 30
-    );
-
+    if (tier.endsWith("_yearly")) {
+      expiresAt.setFullYear(expiresAt.getFullYear() + 1); //excatly 1 year 
+    }
+    else {
+      expiresAt.setMonth(expiresAt.getMonth() + 1); //excatly 1 month 
+    }
     // Update user subscription
     await db
       .collection("users")
