@@ -1,0 +1,37 @@
+import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import { authMiddleware } from './middleware/authMiddleware';
+import { getUserPlanHandler } from './routes/userPlan';
+import { chatSendHandler } from './routes/chatSend';
+import { razorpayWebhookHandler } from './routes/razorpayWebhook';
+import { getAllowedOrigins } from './config/cors';
+
+const app = express();
+
+app.use(cors({ origin: getAllowedOrigins() }));
+
+// The Razorpay webhook MUST receive the raw body for HMAC signature
+// verification, so it is registered before the global JSON parser.
+app.post(
+  '/api/webhooks/razorpay',
+  express.raw({ type: 'application/json' }),
+  razorpayWebhookHandler
+);
+
+app.use(express.json());
+
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', service: 'supportapp-backend' });
+});
+
+app.get('/api/user/plan', authMiddleware, getUserPlanHandler);
+
+app.post('/api/chat/send', authMiddleware, chatSendHandler);
+
+// Central error handler — never leak internals.
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+export default app;
