@@ -3,7 +3,7 @@
   "version": 2,
   "framework": null,
   "buildCommand": "echo \"no build needed - serverless api functions\"",
-  "outputDirectory": null,
+  "outputDirectory": "public",
   "functions": {
     "api/**/*.ts": {
       "maxDuration": 60
