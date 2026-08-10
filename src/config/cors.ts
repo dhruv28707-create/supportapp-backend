@@ -18,6 +18,9 @@ const DEFAULT_ALLOWED_ORIGINS = [
   // ALLOWED_ORIGINS env var can never take the app down.
   'https://supportapp-zeta.vercel.app',
   'https://supportapp-backend.vercel.app',
+  // Main production site (Next.js frontend / web builds / webviews).
+  'https://supportapp.in',
+  'https://www.supportapp.in',
 ].join(',');
 
 export function getAllowedOrigins(): string[] {

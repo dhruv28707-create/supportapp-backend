@@ -40,7 +40,7 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
   };
 
   if (req.query.test !== '1') {
-    res.json({ ...base, note: 'Pass ?test=1 to run a live Groq API check (32 max tokens).' });
+    res.json({ ...base, note: 'Pass ?test=1 to run a live Groq API check (128 max tokens).' });
     return;
   }
 
@@ -61,7 +61,9 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
       body: JSON.stringify({
         model: GROQ_MODEL,
         messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
-        max_tokens: 32,
+        // High enough that gpt-oss-120b's reasoning tokens + a short reply
+        // both fit; a healthy result should show reply != null.
+        max_tokens: 128,
         temperature: 0,
       }),
       signal: controller.signal,

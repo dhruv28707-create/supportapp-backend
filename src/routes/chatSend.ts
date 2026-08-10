@@ -15,7 +15,12 @@ const PRIMARY_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 // stable Groq production model — lower quality than the primary, but it keeps
 // chat alive through model changes.
 const FALLBACK_MODEL = 'llama-3.1-8b-instant';
-const MAX_TOKENS = 500;
+// gpt-oss-120b is a reasoning model: it consumes part of the token budget on
+// hidden reasoning before producing the visible reply (seen via
+// completion_tokens_details.reasoning_tokens). 500 tokens was too small —
+// reasoning could eat it all and leave an empty reply. 2000 gives reasoning
+// room while staying fast on Groq (~500+ t/s) and inside Vercel's limits.
+const MAX_TOKENS = 2000;
 const MAX_MESSAGE_LENGTH = 4000;
 
 interface GroqAttempt {
