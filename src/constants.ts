@@ -35,6 +35,10 @@ export class LimitReachedError extends Error {
   }
 }
 
+// Per-attempt timeout for upstream Groq calls (chat + diagnose). Kept small so
+// a hung upstream call can't blow past Vercel's function duration limits.
+export const GROQ_TIMEOUT_MS = 10000;
+
 // Prices in paise (₹1 = 100 paise). Single source of truth for order amounts.
 export const TIER_PRICES = {
   pro_monthly: 17900, // ₹179

@@ -4,6 +4,7 @@ import { authMiddleware } from './middleware/authMiddleware';
 import { getUserPlanHandler } from './routes/userPlan';
 import { chatSendHandler } from './routes/chatSend';
 import { razorpayWebhookHandler } from './routes/razorpayWebhook';
+import { diagnoseHandler } from './routes/diagnose';
 import { isOriginAllowed } from './config/cors';
 
 const app = express();
@@ -31,6 +32,8 @@ app.use(express.json());
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'supportapp-backend' });
 });
+
+app.get('/api/diagnose', diagnoseHandler);
 
 app.get('/api/user/plan', authMiddleware, getUserPlanHandler);
 

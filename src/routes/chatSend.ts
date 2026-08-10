@@ -4,13 +4,65 @@ import { buildSystemPrompt, RELIGION_KEYS } from '../services/promptService';
 import { checkMessageQuota, consumeMessage } from '../services/messageService';
 import { LimitReachedError } from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
+import { GROQ_TIMEOUT_MS } from '../constants';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-// Model is overridable via env; defaults to a current Groq production model.
+// Primary model — overridable via env; defaults to a current Groq production model.
 // (llama-3.3-70b-versatile was retired on 2026-08-16.)
-const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const PRIMARY_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+// Fallback model used when the primary call fails (retired model, model-level
+// error, transient upstream failure). llama-3.1-8b-instant is a long-running
+// stable Groq production model — lower quality than the primary, but it keeps
+// chat alive through model changes.
+const FALLBACK_MODEL = 'llama-3.1-8b-instant';
 const MAX_TOKENS = 500;
 const MAX_MESSAGE_LENGTH = 4000;
+
+interface GroqAttempt {
+  ok: boolean;
+  status?: number;
+  errorData?: unknown;
+  reply?: string;
+}
+
+/** Single Groq completion attempt. Never throws — failures are returned. */
+async function callGroq(
+  model: string,
+  messages: { role: string; content: string }[]
+): Promise<GroqAttempt> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: MAX_TOKENS,
+        temperature: 0.8,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return { ok: false, status: response.status, errorData };
+    }
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    return { ok: true, reply: data.choices?.[0]?.message?.content?.trim() || '' };
+  } catch (error) {
+    return { ok: false, status: undefined, errorData: error };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function chatSendHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
   const uid = req.user!.uid;
@@ -49,8 +101,8 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
 
   // --- Env guard (fail with a clear error instead of a crash) ---
   if (!GROQ_API_KEY) {
-    console.error('Missing GROQ_API_KEY environment variable');
-    res.status(503).json({ error: 'AI service unavailable' });
+    console.error(`[chat uid=${uid}] Missing GROQ_API_KEY environment variable`);
+    res.status(503).json({ error: 'AI service unavailable', code: 'groq_key_missing' });
     return;
   }
 
@@ -65,7 +117,7 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
       });
       return;
     }
-    console.error('Message quota check failed:', error);
+    console.error(`[chat uid=${uid}] Message quota check failed:`, error);
     res.status(500).json({ error: 'Internal server error' });
     return;
   }
@@ -79,57 +131,43 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
     { role: 'user' as const, content: trimmed },
   ];
 
-  try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages,
-        max_tokens: MAX_TOKENS,
-        temperature: 0.8,
-      }),
-    });
+  // --- Try primary model, then fall back to a secondary model ---
+  const modelsToTry =
+    FALLBACK_MODEL === PRIMARY_MODEL ? [PRIMARY_MODEL] : [PRIMARY_MODEL, FALLBACK_MODEL];
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      console.error('GroqCloud API error:', response.status, errorData);
-      res.status(503).json({ error: 'AI service unavailable' });
-      return;
+  let reply = '';
+  for (const model of modelsToTry) {
+    const attempt = await callGroq(model, messages);
+    if (attempt.ok && attempt.reply) {
+      reply = attempt.reply;
+      break;
     }
-
-    const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const reply = data.choices?.[0]?.message?.content?.trim() || '';
-
-    if (!reply) {
-      res.status(503).json({ error: 'AI service unavailable' });
-      return;
-    }
-
-    // AI responded successfully — only now consume a message from the quota.
-    try {
-      await consumeMessage(uid);
-    } catch (error) {
-      if (error instanceof LimitReachedError) {
-        res.status(429).json({
-          limitReached: true,
-          nextRefreshAt: error.nextRefreshAt,
-        });
-        return;
-      }
-      console.error('Message quota consume failed:', error);
-      res.status(500).json({ error: 'Internal server error' });
-      return;
-    }
-
-    res.json({ reply });
-  } catch (error) {
-    console.error('Chat send error:', error);
-    res.status(503).json({ error: 'AI service unavailable' });
+    console.error(
+      `[chat uid=${uid}] Groq call failed (model=${model} status=${attempt.status ?? 'network/timeout'})`,
+      attempt.errorData
+    );
   }
+
+  if (!reply) {
+    res.status(503).json({ error: 'AI service unavailable', code: 'groq_upstream_error' });
+    return;
+  }
+
+  // AI responded successfully — only now consume a message from the quota.
+  try {
+    await consumeMessage(uid);
+  } catch (error) {
+    if (error instanceof LimitReachedError) {
+      res.status(429).json({
+        limitReached: true,
+        nextRefreshAt: error.nextRefreshAt,
+      });
+      return;
+    }
+    console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
+    res.status(500).json({ error: 'Internal server error' });
+    return;
+  }
+
+  res.json({ reply });
 }
