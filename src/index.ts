@@ -4,11 +4,19 @@ import { authMiddleware } from './middleware/authMiddleware';
 import { getUserPlanHandler } from './routes/userPlan';
 import { chatSendHandler } from './routes/chatSend';
 import { razorpayWebhookHandler } from './routes/razorpayWebhook';
-import { getAllowedOrigins } from './config/cors';
+import { isOriginAllowed } from './config/cors';
 
 const app = express();
 
-app.use(cors({ origin: getAllowedOrigins() }));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // No origin (native apps, curl) → allow.
+      if (!origin) return callback(null, true);
+      callback(null, isOriginAllowed(origin));
+    },
+  })
+);
 
 // The Razorpay webhook MUST receive the raw body for HMAC signature
 // verification, so it is registered before the global JSON parser.
@@ -26,6 +34,8 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/user/plan', authMiddleware, getUserPlanHandler);
 
+// The mobile app calls /api/chat; /api/chat/send is kept as an alias.
+app.post('/api/chat', authMiddleware, chatSendHandler);
 app.post('/api/chat/send', authMiddleware, chatSendHandler);
 
 // Central error handler — never leak internals.

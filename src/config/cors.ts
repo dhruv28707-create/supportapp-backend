@@ -1,8 +1,9 @@
 /**
  * CORS configuration.
  *
- * Allowed origins come from the ALLOWED_ORIGINS env var (comma-separated).
- * Falls back to local dev origins when unset.
+ * Allowed origins come from the ALLOWED_ORIGINS env var (comma-separated,
+ * or "*" for any origin). Falls back to local dev + production frontends
+ * when unset, so a missing env var can never take the app down.
  *
  * Browser requests must come from an allowed origin; anything else with an
  * Origin header is rejected with 403 (in Vercel handlers) or gets no CORS
@@ -10,8 +11,14 @@
  * header (mobile apps, curl, server-to-server) are allowed.
  */
 
-const DEFAULT_ALLOWED_ORIGINS =
-  'http://localhost:3000,http://localhost:5173';
+const DEFAULT_ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  // Production frontends — safe to call the API by default so a missing
+  // ALLOWED_ORIGINS env var can never take the app down.
+  'https://supportapp-zeta.vercel.app',
+  'https://supportapp-backend.vercel.app',
+].join(',');
 
 export function getAllowedOrigins(): string[] {
   const raw = process.env.ALLOWED_ORIGINS || DEFAULT_ALLOWED_ORIGINS;
@@ -23,7 +30,10 @@ export function getAllowedOrigins(): string[] {
 
 export function isOriginAllowed(origin: string | undefined): boolean {
   if (!origin) return false;
-  return getAllowedOrigins().includes(origin);
+  const allowed = getAllowedOrigins();
+  // Explicit wildcard: ALLOWED_ORIGINS="*" allows any browser origin.
+  if (allowed.includes('*')) return true;
+  return allowed.includes(origin);
 }
 
 /**

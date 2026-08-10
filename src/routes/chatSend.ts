@@ -1,12 +1,14 @@
 import { Response } from 'express';
 import { PersonalityType, PERSONALITIES } from '../constants';
 import { buildSystemPrompt, RELIGION_KEYS } from '../services/promptService';
-import { checkAndConsumeMessage } from '../services/messageService';
+import { checkMessageQuota, consumeMessage } from '../services/messageService';
 import { LimitReachedError } from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+// Model is overridable via env; defaults to a current Groq production model.
+// (llama-3.3-70b-versatile was retired on 2026-08-16.)
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 const MAX_TOKENS = 500;
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -52,9 +54,9 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
     return;
   }
 
-  // --- Message quota (authenticated, DB-backed) ---
+  // --- Message quota check (does NOT consume yet; consumed only on AI success) ---
   try {
-    await checkAndConsumeMessage(uid);
+    await checkMessageQuota(uid);
   } catch (error) {
     if (error instanceof LimitReachedError) {
       res.status(429).json({
@@ -106,6 +108,22 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
 
     if (!reply) {
       res.status(503).json({ error: 'AI service unavailable' });
+      return;
+    }
+
+    // AI responded successfully — only now consume a message from the quota.
+    try {
+      await consumeMessage(uid);
+    } catch (error) {
+      if (error instanceof LimitReachedError) {
+        res.status(429).json({
+          limitReached: true,
+          nextRefreshAt: error.nextRefreshAt,
+        });
+        return;
+      }
+      console.error('Message quota consume failed:', error);
+      res.status(500).json({ error: 'Internal server error' });
       return;
     }
 

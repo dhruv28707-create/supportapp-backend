@@ -107,7 +107,42 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
   return state;
 }
 
-export async function checkAndConsumeMessage(uid: string): Promise<{ success: true }> {
+/**
+ * Checks the user's message quota WITHOUT consuming a message.
+ * Throws LimitReachedError when the limit is hit. Handles window refresh
+ * and subscription expiry the same way the consuming path does.
+ */
+export async function checkMessageQuota(uid: string): Promise<UserMessageState> {
+  return await db.runTransaction(async (transaction) => {
+    const { state, ref } = await loadSubscriptionState(transaction, uid);
+    const now = Date.now();
+
+    const active = applyExpiry(state, now);
+    const config = PLAN_CONFIG[active.plan];
+
+    let messageCount = active.messageCount;
+    let lastResetAt = active.lastResetAt;
+
+    // Refresh window (message quota resets after refreshMs).
+    if (now - lastResetAt >= config.refreshMs) {
+      messageCount = 0;
+      lastResetAt = now;
+    }
+
+    if (messageCount >= config.limit) {
+      throw new LimitReachedError(lastResetAt + config.refreshMs, active.plan);
+    }
+
+    return { plan: active.plan, messageCount, lastResetAt };
+  });
+}
+
+/**
+ * Consumes one message from the user's quota. Throws LimitReachedError when
+ * the limit is hit. Call this only AFTER a successful AI reply so that failed
+ * AI calls do not burn the user's message allowance.
+ */
+export async function consumeMessage(uid: string): Promise<{ success: true }> {
   return await db.runTransaction(async (transaction) => {
     const { state, ref } = await loadSubscriptionState(transaction, uid);
     const now = Date.now();
