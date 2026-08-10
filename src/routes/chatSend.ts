@@ -71,33 +71,63 @@ async function callGroq(
 
 export async function chatSendHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
   const uid = req.user!.uid;
-  const { message, personality, religionSubType } = (req.body || {}) as {
+  const body = (req.body || {}) as {
     message?: unknown;
+    messages?: unknown;
     personality?: unknown;
     religionSubType?: unknown;
   };
 
-  // --- Input validation ---
-  if (typeof message !== 'string') {
+  // --- Input validation (with legacy-app compatibility) ---
+  // Older app builds sent the raw Groq-style payload { messages: [...] }
+  // instead of { message: string }. Accept both: if `message` is missing,
+  // fall back to the content of the last message in the `messages` array.
+  let rawMessage: unknown = body.message;
+  if (typeof rawMessage !== 'string' && Array.isArray(body.messages) && body.messages.length > 0) {
+    const legacyMessages = body.messages as Array<{ role?: unknown; content?: unknown } | null>;
+    // Legacy apps sent full alternating history — prefer the latest user turn.
+    for (let i = legacyMessages.length - 1; i >= 0; i--) {
+      const entry = legacyMessages[i];
+      if (entry && typeof entry.content === 'string' && entry.role === 'user') {
+        rawMessage = entry.content;
+        break;
+      }
+    }
+    // No user-role entry found: fall back to the newest entry with content.
+    if (typeof rawMessage !== 'string') {
+      for (let i = legacyMessages.length - 1; i >= 0; i--) {
+        const entry = legacyMessages[i];
+        if (entry && typeof entry.content === 'string') {
+          rawMessage = entry.content;
+          break;
+        }
+      }
+    }
+  }
+
+  if (typeof rawMessage !== 'string') {
     res.status(400).json({ error: 'message must be a string' });
     return;
   }
-  const trimmed = message.trim();
+  const trimmed = rawMessage.trim();
   if (trimmed.length < 1 || trimmed.length > MAX_MESSAGE_LENGTH) {
     res.status(400).json({ error: `message must be 1-${MAX_MESSAGE_LENGTH} characters` });
     return;
   }
 
-  if (typeof personality !== 'string' || !PERSONALITIES.includes(personality as PersonalityType)) {
-    res.status(400).json({ error: 'Invalid personality' });
-    return;
-  }
+  // Legacy app payloads may not send a personality — default to Friend
+  // (the same fallback buildSystemPrompt uses) instead of rejecting.
+  const personality: PersonalityType =
+    typeof body.personality === 'string' &&
+    PERSONALITIES.includes(body.personality as PersonalityType)
+      ? (body.personality as PersonalityType)
+      : 'Friend';
 
   // religionSubType is user input injected into the system prompt — allowlist only.
-  if (religionSubType !== undefined) {
+  if (body.religionSubType !== undefined) {
     if (
-      typeof religionSubType !== 'string' ||
-      !RELIGION_KEYS.includes(religionSubType.toLowerCase())
+      typeof body.religionSubType !== 'string' ||
+      !RELIGION_KEYS.includes(body.religionSubType.toLowerCase())
     ) {
       res.status(400).json({ error: 'Invalid religionSubType' });
       return;
@@ -128,8 +158,8 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
   }
 
   const systemPrompt = buildSystemPrompt(
-    personality as PersonalityType,
-    typeof religionSubType === 'string' ? religionSubType : undefined
+    personality,
+    typeof body.religionSubType === 'string' ? body.religionSubType : undefined
   );
   const messages = [
     { role: 'system' as const, content: systemPrompt },
@@ -182,5 +212,11 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
     return;
   }
 
-  res.json({ reply });
+  res.json({
+    reply,
+    // Legacy app builds parse the raw OpenAI-style shape
+    // (data.choices[0].message.content) instead of data.reply — return both
+    // so old and new app versions both work.
+    choices: [{ message: { role: 'assistant' as const, content: reply } }],
+  });
 }
