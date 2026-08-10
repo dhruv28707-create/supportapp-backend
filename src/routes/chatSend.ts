@@ -142,10 +142,18 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
       reply = attempt.reply;
       break;
     }
-    console.error(
-      `[chat uid=${uid}] Groq call failed (model=${model} status=${attempt.status ?? 'network/timeout'})`,
-      attempt.errorData
-    );
+    if (attempt.ok) {
+      // HTTP 200 but no content — e.g. the token budget was hit before any
+      // text was produced, or the model filtered the response.
+      console.error(
+        `[chat uid=${uid}] Groq returned HTTP 200 with empty content (model=${model})`
+      );
+    } else {
+      console.error(
+        `[chat uid=${uid}] Groq call failed (model=${model} status=${attempt.status ?? 'network/timeout'})`,
+        attempt.errorData
+      );
+    }
   }
 
   if (!reply) {
