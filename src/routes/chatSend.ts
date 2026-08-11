@@ -8,19 +8,21 @@ import { GROQ_TIMEOUT_MS } from '../constants';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 // Primary model — overridable via env; defaults to a current Groq production model.
-// (llama-3.3-70b-versatile was retired on 2026-08-16.)
-const PRIMARY_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
-// Fallback model used when the primary call fails (retired model, model-level
-// error, transient upstream failure). llama-3.1-8b-instant is a long-running
-// stable Groq production model — lower quality than the primary, but it keeps
-// chat alive through model changes.
+// llama-4-scout is a NON-reasoning MoE (17B active) model: no hidden
+// chain-of-thought tokens, so every output token is visible reply. It's
+// ~5x cheaper than the reasoning openai/gpt-oss-120b it replaces and still
+// strong at warm, short emotional replies (~450 t/s on Groq).
+const PRIMARY_MODEL = process.env.GROQ_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+// Fallback model used when the primary call fails (model-level error,
+// transient upstream failure). llama-3.1-8b-instant is a long-running stable
+// Groq production model — lower quality than the primary, but it keeps chat
+// alive through model changes.
 const FALLBACK_MODEL = 'llama-3.1-8b-instant';
-// gpt-oss-120b is a reasoning model: it consumes part of the token budget on
-// hidden reasoning before producing the visible reply (seen via
-// completion_tokens_details.reasoning_tokens). 500 tokens was too small —
-// reasoning could eat it all and leave an empty reply. 2000 gives reasoning
-// room while staying fast on Groq (~500+ t/s) and inside Vercel's limits.
-const MAX_TOKENS = 2000;
+// No hidden reasoning tokens with llama-4-scout, so the budget goes straight
+// to the visible reply. The system prompt asks for 2-4 short sentences
+// (~120 tokens); 600 is a generous ceiling (roughly 450 words) that still
+// caps runaway responses without mid-sentence truncation.
+const MAX_TOKENS = 600;
 const MAX_MESSAGE_LENGTH = 4000;
 
 interface GroqAttempt {

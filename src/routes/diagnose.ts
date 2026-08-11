@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { GROQ_TIMEOUT_MS } from '../constants';
 
-const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
 
 /**
  * Diagnostic endpoint (no secrets exposed).
@@ -61,8 +61,8 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
       body: JSON.stringify({
         model: GROQ_MODEL,
         messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
-        // High enough that gpt-oss-120b's reasoning tokens + a short reply
-        // both fit; a healthy result should show reply != null.
+        // Enough for a short diagnostic reply; a healthy result should show
+        // reply != null.
         max_tokens: 128,
         temperature: 0,
       }),
