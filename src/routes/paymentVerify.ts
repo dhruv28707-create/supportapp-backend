@@ -1,19 +1,14 @@
 import { Response } from 'express';
 import crypto from 'crypto';
-import Razorpay from 'razorpay';
 import { db } from '../config/firebaseAdmin';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { consumeRateLimit, RateLimitExceededError } from '../services/rateLimitService';
+import { razorpay } from '../services/razorpayClient';
 import {
   grantPlanAndMarkPaid,
   computeExpiresAtMs,
   PAYMENTS_COLLECTION,
 } from '../services/subscriptionService';
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID!,
-  key_secret: process.env.RAZORPAY_KEY_SECRET!,
-});
 
 const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const VERIFY_RATE_LIMIT_MAX = 20;
