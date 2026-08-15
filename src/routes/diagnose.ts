@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { GROQ_TIMEOUT_MS } from '../constants';
+import { razorpay } from '../services/razorpayClient';
 
 const GROQ_MODEL = process.env.GROQ_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
 
@@ -38,6 +39,44 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
     groqModel: GROQ_MODEL,
     env,
   };
+
+  // Live Razorpay self-test: ?rzp=1 attempts to create a minimal ₹1 order
+  // with the deployed keys and reports the exact outcome (or upstream error).
+  // Never exposes the keys themselves. The order is never paid and expires.
+  if (req.query.rzp === '1') {
+    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+      res.json({ ...base, rzpTest: { ok: false, error: 'RAZORPAY keys are not set' } });
+      return;
+    }
+    const mode = process.env.RAZORPAY_KEY_ID.startsWith('rzp_live_') ? 'live' : 'test';
+    try {
+      const order = await razorpay.orders.create({
+        amount: 100, // ₹1 — minimal, never paid
+        currency: 'INR',
+        receipt: `diag_${Date.now()}`,
+      });
+      res.json({ ...base, rzpTest: { ok: true, mode, orderId: order.id } });
+    } catch (error) {
+      const err = error as {
+        statusCode?: number;
+        error?: { code?: string; description?: string };
+        message?: string;
+      };
+      res.json({
+        ...base,
+        rzpTest: {
+          ok: false,
+          mode,
+          statusCode: err.statusCode ?? null,
+          code: err.error?.code ?? null,
+          description: err.error?.description ?? null,
+          message: err.message ?? null,
+          raw: String(error),
+        },
+      });
+    }
+    return;
+  }
 
   if (req.query.test !== '1') {
     res.json({ ...base, note: 'Pass ?test=1 to run a live Groq API check (128 max tokens).' });
