@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { GROQ_TIMEOUT_MS } from '../constants';
 import { razorpay } from '../services/razorpayClient';
 
-const GROQ_MODEL = process.env.GROQ_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
 
 /**
  * Diagnostic endpoint (no secrets exposed).

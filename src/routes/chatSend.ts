@@ -8,17 +8,17 @@ import { GROQ_TIMEOUT_MS } from '../constants';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 // Primary model — overridable via env; defaults to a current Groq production model.
-// llama-4-scout is a NON-reasoning MoE (17B active) model: no hidden
-// chain-of-thought tokens, so every output token is visible reply. It's
-// ~5x cheaper than the reasoning openai/gpt-oss-120b it replaces and still
-// strong at warm, short emotional replies (~450 t/s on Groq).
-const PRIMARY_MODEL = process.env.GROQ_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+// llama-3.1-8b-instant is Meta's Llama 3.1 8B: a NON-reasoning dense model
+// with no hidden chain-of-thought tokens, so every output token is visible
+// reply. It's fast (~750 t/s on Groq), cheap, and strong at warm, short
+// emotional replies.
+const PRIMARY_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
 // Fallback model used when the primary call fails (model-level error,
-// transient upstream failure). llama-3.1-8b-instant is a long-running stable
-// Groq production model — lower quality than the primary, but it keeps chat
-// alive through model changes.
-const FALLBACK_MODEL = 'llama-3.1-8b-instant';
-// No hidden reasoning tokens with llama-4-scout, so the budget goes straight
+// transient upstream failure). gemma2-9b-it is Google's Gemma 2 9B — a
+// stable Groq production model from a different family than the primary,
+// which keeps chat alive through model-specific outages.
+const FALLBACK_MODEL = 'gemma2-9b-it';
+// No hidden reasoning tokens with llama-3.1-8b-instant, so the budget goes straight
 // to the visible reply. The system prompt asks for 2-4 short sentences
 // (~120 tokens); 600 is a generous ceiling (roughly 450 words) that still
 // caps runaway responses without mid-sentence truncation.
