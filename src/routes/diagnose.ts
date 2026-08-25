@@ -2,7 +2,8 @@ import { Request, Response } from 'express';
 import { GROQ_TIMEOUT_MS } from '../constants';
 import { razorpay } from '../services/razorpayClient';
 
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'llama-3.1-8b-instant';
+const PRIMARY_MODEL = process.env.PRIMARY_MODEL || 'qwen/qwen-2.5-14b-instruct';
 
 /**
  * Diagnostic endpoint (no secrets exposed).
@@ -22,8 +23,10 @@ const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
  */
 export async function diagnoseHandler(req: Request, res: Response): Promise<void> {
   const env = {
+    OPENROUTER_API_KEY: Boolean(process.env.OPENROUTER_API_KEY),
     GROQ_API_KEY: Boolean(process.env.GROQ_API_KEY),
-    GROQ_MODEL: process.env.GROQ_MODEL || null,
+    PRIMARY_MODEL: process.env.PRIMARY_MODEL || null,
+    FALLBACK_MODEL: process.env.FALLBACK_MODEL || null,
     FIREBASE_PROJECT_ID: Boolean(process.env.FIREBASE_PROJECT_ID),
     FIREBASE_CLIENT_EMAIL: Boolean(process.env.FIREBASE_CLIENT_EMAIL),
     FIREBASE_PRIVATE_KEY: Boolean(process.env.FIREBASE_PRIVATE_KEY),
@@ -36,7 +39,8 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
     ok: true,
     service: 'supportapp-backend',
     time: new Date().toISOString(),
-    groqModel: GROQ_MODEL,
+    primaryModel: PRIMARY_MODEL,
+    fallbackModel: FALLBACK_MODEL,
     env,
   };
 
@@ -98,7 +102,7 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: GROQ_MODEL,
+        model: FALLBACK_MODEL,
         messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
         // Enough for a short diagnostic reply; a healthy result should show
         // reply != null.

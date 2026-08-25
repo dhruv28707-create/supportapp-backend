@@ -7,21 +7,38 @@ import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { GROQ_TIMEOUT_MS } from '../constants';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-// Primary model — overridable via env; defaults to a current Groq production model.
-// llama-3.1-8b-instant is Meta's Llama 3.1 8B: a NON-reasoning dense model
-// with no hidden chain-of-thought tokens, so every output token is visible
-// reply. It's fast (~750 t/s on Groq), cheap, and strong at warm, short
-// emotional replies.
-const PRIMARY_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
-// Fallback model used when the primary call fails (model-level error,
-// transient upstream failure). gemma2-9b-it is Google's Gemma 2 9B — a
-// stable Groq production model from a different family than the primary,
-// which keeps chat alive through model-specific outages.
-const FALLBACK_MODEL = 'gemma2-9b-it';
-// No hidden reasoning tokens with llama-3.1-8b-instant, so the budget goes straight
-// to the visible reply. The system prompt asks for 2-4 short sentences
-// (~120 tokens); 600 is a generous ceiling (roughly 450 words) that still
-// caps runaway responses without mid-sentence truncation.
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+
+interface ModelTarget {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+// Primary model — Qwen2.5-14B-Instruct (Apache 2.0) served via OpenRouter
+// (Groq does not host Qwen models). Plain instruct model: no thinking mode,
+// no hidden chain-of-thought tokens. Overridable via env so the provider or
+// model can be swapped without a code change.
+const PRIMARY: ModelTarget = {
+  name: 'primary',
+  baseUrl: process.env.PRIMARY_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions',
+  apiKey: process.env.PRIMARY_API_KEY || OPENROUTER_API_KEY || '',
+  model: process.env.PRIMARY_MODEL || 'qwen/qwen-2.5-14b-instruct',
+};
+// Fallback model — Llama 3.1 8B Instruct on Groq: fast, stable, from a
+// different provider AND family than the primary, so chat stays alive
+// through provider-wide outages, not just single-model failures.
+const FALLBACK: ModelTarget = {
+  name: 'fallback',
+  baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
+  apiKey: GROQ_API_KEY || '',
+  model: process.env.FALLBACK_MODEL || 'llama-3.1-8b-instant',
+};
+// Both models are plain instruct models (no hidden reasoning tokens), so the
+// budget goes straight to the visible reply. The system prompt asks for 2-4
+// short sentences (~120 tokens); 600 is a generous ceiling (roughly 450 words)
+// that still caps runaway responses without mid-sentence truncation.
 const MAX_TOKENS = 600;
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -32,22 +49,25 @@ interface GroqAttempt {
   reply?: string;
 }
 
-/** Single Groq completion attempt. Never throws — failures are returned. */
-async function callGroq(
-  model: string,
+/** Single completion attempt against a model target. Never throws — failures are returned. */
+async function callModel(
+  target: ModelTarget,
   messages: { role: string; content: string }[]
 ): Promise<GroqAttempt> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    if (!target.apiKey) {
+      return { ok: false, status: undefined, errorData: `missing API key for ${target.name}` };
+    }
+    const response = await fetch(target.baseUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_API_KEY}`,
+        Authorization: `Bearer ${target.apiKey}`,
       },
       body: JSON.stringify({
-        model,
+        model: target.model,
         messages,
         max_tokens: MAX_TOKENS,
         temperature: 0.8,
@@ -137,9 +157,9 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
   }
 
   // --- Env guard (fail with a clear error instead of a crash) ---
-  if (!GROQ_API_KEY) {
-    console.error(`[chat uid=${uid}] Missing GROQ_API_KEY environment variable`);
-    res.status(503).json({ error: 'AI service unavailable', code: 'groq_key_missing' });
+  if (!PRIMARY.apiKey && !FALLBACK.apiKey) {
+    console.error(`[chat uid=${uid}] Missing OPENROUTER_API_KEY and GROQ_API_KEY env vars`);
+    res.status(503).json({ error: 'AI service unavailable', code: 'ai_key_missing' });
     return;
   }
 
@@ -169,12 +189,11 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
   ];
 
   // --- Try primary model, then fall back to a secondary model ---
-  const modelsToTry =
-    FALLBACK_MODEL === PRIMARY_MODEL ? [PRIMARY_MODEL] : [PRIMARY_MODEL, FALLBACK_MODEL];
+  const targetsToTry = PRIMARY.model === FALLBACK.model ? [PRIMARY] : [PRIMARY, FALLBACK];
 
   let reply = '';
-  for (const model of modelsToTry) {
-    const attempt = await callGroq(model, messages);
+  for (const target of targetsToTry) {
+    const attempt = await callModel(target, messages);
     if (attempt.ok && attempt.reply) {
       reply = attempt.reply;
       break;
@@ -183,18 +202,18 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
       // HTTP 200 but no content — e.g. the token budget was hit before any
       // text was produced, or the model filtered the response.
       console.error(
-        `[chat uid=${uid}] Groq returned HTTP 200 with empty content (model=${model})`
+        `[chat uid=${uid}] Upstream returned HTTP 200 with empty content (${target.name} model=${target.model})`
       );
     } else {
       console.error(
-        `[chat uid=${uid}] Groq call failed (model=${model} status=${attempt.status ?? 'network/timeout'})`,
+        `[chat uid=${uid}] Upstream call failed (${target.name} model=${target.model} status=${attempt.status ?? 'network/timeout'})`,
         attempt.errorData
       );
     }
   }
 
   if (!reply) {
-    res.status(503).json({ error: 'AI service unavailable', code: 'groq_upstream_error' });
+    res.status(503).json({ error: 'AI service unavailable', code: 'ai_upstream_error' });
     return;
   }
 
