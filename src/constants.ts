@@ -35,9 +35,11 @@ export class LimitReachedError extends Error {
   }
 }
 
-// Per-attempt timeout for upstream Groq calls (chat + diagnose). Kept small so
-// a hung upstream call can't blow past Vercel's function duration limits.
-export const GROQ_TIMEOUT_MS = 10000;
+// Per-attempt timeout for upstream AI calls (chat + diagnose). Kept small so
+// a hung upstream call can't blow past Vercel's function duration limits,
+// but generous enough that slower routes (e.g. OpenRouter free-tier routing)
+// can still answer: worst case is 2 x 15s attempts = 30s of a 60s budget.
+export const GROQ_TIMEOUT_MS = 15000;
 
 // Prices in paise (₹1 = 100 paise). Single source of truth for order amounts.
 export const TIER_PRICES = {

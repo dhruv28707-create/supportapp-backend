@@ -34,13 +34,15 @@ const PRIMARY: ModelTarget = {
 // Fallback model — GPT-OSS 20B on Groq: fast and cheap. NOTE: Groq shut down
 // llama-3.1-8b-instant (and all Llama chat models) on 2026-08-16, so the
 // Llama family is gone from Groq. gpt-oss-20b is Groq's recommended
-// replacement; reasoning_effort:'none' keeps every token a visible reply.
+// replacement. It rejects reasoning_effort:'none' (only low/medium/high are
+// allowed), so use 'low' — its reasoning comes back in a separate field and
+// never leaks into the visible reply content.
 const FALLBACK: ModelTarget = {
   name: 'fallback',
   baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
   apiKey: GROQ_API_KEY || '',
   model: process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b',
-  extraBody: { reasoning_effort: 'none' },
+  extraBody: { reasoning_effort: 'low' },
 };
 // Both models are plain instruct models (no hidden reasoning tokens), so the
 // budget goes straight to the visible reply. The system prompt asks for 2-4
