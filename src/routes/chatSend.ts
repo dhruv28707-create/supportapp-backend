@@ -14,26 +14,33 @@ interface ModelTarget {
   baseUrl: string;
   apiKey: string;
   model: string;
+  // Extra body fields merged into the request (used to suppress any
+  // hidden chain-of-thought output on models that support a reasoning mode).
+  extraBody?: Record<string, unknown>;
 }
 
-// Primary model — Qwen2.5-14B-Instruct (Apache 2.0) served via OpenRouter
-// (Groq does not host Qwen models). Plain instruct model: no thinking mode,
-// no hidden chain-of-thought tokens. Overridable via env so the provider or
-// model can be swapped without a code change.
+// Primary model — Qwen3-14B (Apache 2.0) served via OpenRouter (Groq does
+// not host Qwen models). NOTE: the old slug qwen/qwen-2.5-14b-instruct was
+// removed from OpenRouter's catalog; qwen3-14b is its successor. Qwen3 runs
+// in non-thinking mode by default; reasoning.enabled=false is sent anyway so
+// no <think> chain-of-thought can ever leak into the reply.
 const PRIMARY: ModelTarget = {
   name: 'primary',
   baseUrl: process.env.PRIMARY_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions',
   apiKey: process.env.PRIMARY_API_KEY || OPENROUTER_API_KEY || '',
-  model: process.env.PRIMARY_MODEL || 'qwen/qwen-2.5-14b-instruct',
+  model: process.env.PRIMARY_MODEL || 'qwen/qwen3-14b',
+  extraBody: { reasoning: { enabled: false } },
 };
-// Fallback model — Llama 3.1 8B Instruct on Groq: fast, stable, from a
-// different provider AND family than the primary, so chat stays alive
-// through provider-wide outages, not just single-model failures.
+// Fallback model — GPT-OSS 20B on Groq: fast and cheap. NOTE: Groq shut down
+// llama-3.1-8b-instant (and all Llama chat models) on 2026-08-16, so the
+// Llama family is gone from Groq. gpt-oss-20b is Groq's recommended
+// replacement; reasoning_effort:'none' keeps every token a visible reply.
 const FALLBACK: ModelTarget = {
   name: 'fallback',
   baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
   apiKey: GROQ_API_KEY || '',
-  model: process.env.FALLBACK_MODEL || 'llama-3.1-8b-instant',
+  model: process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b',
+  extraBody: { reasoning_effort: 'none' },
 };
 // Both models are plain instruct models (no hidden reasoning tokens), so the
 // budget goes straight to the visible reply. The system prompt asks for 2-4
@@ -71,6 +78,7 @@ async function callModel(
         messages,
         max_tokens: MAX_TOKENS,
         temperature: 0.8,
+        ...(target.extraBody || {}),
       }),
       signal: controller.signal,
     });

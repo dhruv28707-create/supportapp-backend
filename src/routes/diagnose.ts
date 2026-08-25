@@ -2,8 +2,8 @@ import { Request, Response } from 'express';
 import { GROQ_TIMEOUT_MS } from '../constants';
 import { razorpay } from '../services/razorpayClient';
 
-const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'llama-3.1-8b-instant';
-const PRIMARY_MODEL = process.env.PRIMARY_MODEL || 'qwen/qwen-2.5-14b-instruct';
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b';
+const PRIMARY_MODEL = process.env.PRIMARY_MODEL || 'qwen/qwen3-14b';
 
 /**
  * Diagnostic endpoint (no secrets exposed).
