@@ -3,11 +3,15 @@
   "version": "1.0.0",
   "description": "SAFESPACE Backend - Emotional Support App with 12 AI Personalities",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
-    "lint": "eslint src --ext .ts"
+    "lint": "tsc --noEmit",
+    "sanity": "ts-node scripts/sanity-check.ts"
   },
   "keywords": [],
   "author": "",

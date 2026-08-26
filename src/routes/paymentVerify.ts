@@ -9,6 +9,7 @@ import {
   computeExpiresAtMs,
   PAYMENTS_COLLECTION,
 } from '../services/subscriptionService';
+import { tierToPlan } from '../constants';
 
 const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const VERIFY_RATE_LIMIT_MAX = 20;
@@ -95,9 +96,23 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
       return;
     }
 
-    // Idempotency: never re-verify an already-paid order.
+    // Idempotency: a replayed verify (e.g. client retry after a network drop)
+    // succeeds with the already-granted result instead of erroring, so the
+    // client never shows a failure for a payment that actually went through.
     if (record.status === 'paid') {
-      res.status(400).json({ error: 'Payment already verified' });
+      const plan = tierToPlan(record.tier);
+      if (!plan) {
+        console.error(`Payment ${razorpay_order_id} is paid but has unknown tier:`, record.tier);
+        res.status(500).json({ error: 'Internal server error' });
+        return;
+      }
+      const expiresAtMs = computeExpiresAtMs(record.tier);
+      res.json({
+        success: true,
+        plan,
+        expiresAt: expiresAtMs ? new Date(expiresAtMs).toISOString() : null,
+        alreadyVerified: true,
+      });
       return;
     }
 

@@ -1,18 +1,20 @@
 import { Request, Response } from 'express';
-import { GROQ_TIMEOUT_MS } from '../constants';
+import { AI_TIMEOUT_MS } from '../constants';
 import { razorpay } from '../services/razorpayClient';
 
 const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b';
 const PRIMARY_MODEL = process.env.PRIMARY_MODEL || 'qwen/qwen3-14b';
 
 /**
- * Diagnostic endpoint (no secrets exposed).
+ * Diagnostic endpoint (no secrets exposed). Disabled by default — set
+ * ENABLE_DIAGNOSE=true in the environment to turn it on, since it reveals
+ * which secrets are configured and can trigger real upstream calls.
  *
  * GET /api/diagnose
- *   Reports which required env vars are present, plus the active Groq model.
+ *   Reports which required env vars are present, plus the active models.
  *
  * GET /api/diagnose?test=1
- *   Additionally performs a live Groq API call (32 max tokens — small but
+ *   Additionally performs a live Groq API call (128 max tokens — small but
  *   enough for a real reply) and reports the exact upstream status, reply,
  *   finish_reason, usage, and a raw-response snippet when no content came
  *   back. This pinpoints whether the AI failure is a missing key, an
@@ -22,6 +24,11 @@ const PRIMARY_MODEL = process.env.PRIMARY_MODEL || 'qwen/qwen3-14b';
  * the backend is misconfigured.
  */
 export async function diagnoseHandler(req: Request, res: Response): Promise<void> {
+  if (process.env.ENABLE_DIAGNOSE !== 'true') {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
+
   const env = {
     OPENROUTER_API_KEY: Boolean(process.env.OPENROUTER_API_KEY),
     GROQ_API_KEY: Boolean(process.env.GROQ_API_KEY),
@@ -93,7 +100,7 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',

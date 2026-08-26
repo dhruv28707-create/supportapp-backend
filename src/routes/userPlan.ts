@@ -7,11 +7,6 @@ export async function getUserPlanHandler(req: AuthenticatedRequest, res: Respons
   // uid is always taken from the verified Firebase token — never from the client.
   const uid = req.user!.uid;
 
-  if (!uid) {
-    res.status(400).json({ error: 'uid is required' });
-    return;
-  }
-
   try {
     const { plan, messageCount, lastResetAt } = await checkAndResetOnly(uid);
 

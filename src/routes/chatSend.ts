@@ -4,7 +4,7 @@ import { buildSystemPrompt, RELIGION_KEYS } from '../services/promptService';
 import { checkMessageQuota, consumeMessage } from '../services/messageService';
 import { LimitReachedError } from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
-import { GROQ_TIMEOUT_MS } from '../constants';
+import { AI_TIMEOUT_MS } from '../constants';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -64,7 +64,7 @@ async function callModel(
   messages: { role: string; content: string }[]
 ): Promise<GroqAttempt> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
     if (!target.apiKey) {
       return { ok: false, status: undefined, errorData: `missing API key for ${target.name}` };
@@ -148,12 +148,22 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
   }
 
   // Legacy app payloads may not send a personality — default to Friend
-  // (the same fallback buildSystemPrompt uses) instead of rejecting.
-  const personality: PersonalityType =
-    typeof body.personality === 'string' &&
-    PERSONALITIES.includes(body.personality as PersonalityType)
-      ? (body.personality as PersonalityType)
-      : 'Friend';
+  // (the same fallback buildSystemPrompt uses). But an explicitly invalid
+  // personality is rejected (consistent with religionSubType) so clients get
+  // clear feedback instead of silently talking to a different persona.
+  let personality: PersonalityType = 'Friend';
+  if (body.personality !== undefined) {
+    if (
+      typeof body.personality !== 'string' ||
+      !PERSONALITIES.includes(body.personality as PersonalityType)
+    ) {
+      res.status(400).json({
+        error: `Invalid personality. Valid options: ${PERSONALITIES.join(', ')}`,
+      });
+      return;
+    }
+    personality = body.personality as PersonalityType;
+  }
 
   // religionSubType is user input injected into the system prompt — allowlist only.
   if (body.religionSubType !== undefined) {
@@ -189,10 +199,9 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
     return;
   }
 
-  const systemPrompt = buildSystemPrompt(
-    personality,
-    typeof body.religionSubType === 'string' ? body.religionSubType : undefined
-  );
+  const religionSubType =
+    typeof body.religionSubType === 'string' ? body.religionSubType : undefined;
+  const systemPrompt = buildSystemPrompt(personality, religionSubType);
   const messages = [
     { role: 'system' as const, content: systemPrompt },
     { role: 'user' as const, content: trimmed },
@@ -245,6 +254,9 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
 
   res.json({
     reply,
+    // Echo back the effective persona so clients can confirm what was used.
+    personality,
+    religionSubType: religionSubType ?? null,
     // Legacy app builds parse the raw OpenAI-style shape
     // (data.choices[0].message.content) instead of data.reply — return both
     // so old and new app versions both work.
