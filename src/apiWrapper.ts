@@ -1,7 +1,8 @@
+import { Request, Response } from 'express';
 import { enforceCors } from './config/cors';
-import { authMiddleware } from './middleware/authMiddleware';
+import { authMiddleware, AuthenticatedRequest } from './middleware/authMiddleware';
 
-type RouteHandler = (req: any, res: any) => Promise<void> | void;
+type RouteHandler = (req: AuthenticatedRequest, res: Response) => Promise<void> | void;
 
 /**
  * Builds a Vercel serverless handler with the shared boilerplate every
@@ -9,18 +10,20 @@ type RouteHandler = (req: any, res: any) => Promise<void> | void;
  * method check. The route handler runs without authentication.
  */
 export function publicEndpoint(method: 'GET' | 'POST', routeHandler: RouteHandler) {
-  return async function handler(req: any, res: any): Promise<void> {
+  return async function handler(req: Request, res: Response): Promise<void> {
     if (!enforceCors(req, res)) return;
 
     if (req.method === 'OPTIONS') {
-      return res.status(204).end();
+      res.status(204).end();
+      return;
     }
 
     if (req.method !== method) {
-      return res.status(405).json({ error: 'Method not allowed' });
+      res.status(405).json({ error: 'Method not allowed' });
+      return;
     }
 
-    await routeHandler(req, res);
+    await routeHandler(req as AuthenticatedRequest, res);
   };
 }
 
@@ -29,17 +32,21 @@ export function publicEndpoint(method: 'GET' | 'POST', routeHandler: RouteHandle
  * then delegates to the route handler.
  */
 export function protectedEndpoint(method: 'GET' | 'POST', routeHandler: RouteHandler) {
-  return async function handler(req: any, res: any): Promise<void> {
+  return async function handler(req: Request, res: Response): Promise<void> {
     if (!enforceCors(req, res)) return;
 
     if (req.method === 'OPTIONS') {
-      return res.status(204).end();
+      res.status(204).end();
+      return;
     }
 
     if (req.method !== method) {
-      return res.status(405).json({ error: 'Method not allowed' });
+      res.status(405).json({ error: 'Method not allowed' });
+      return;
     }
 
-    await authMiddleware(req, res, () => routeHandler(req, res));
+    await authMiddleware(req as AuthenticatedRequest, res, () =>
+      routeHandler(req as AuthenticatedRequest, res)
+    );
   };
 }

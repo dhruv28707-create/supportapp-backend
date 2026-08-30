@@ -41,9 +41,6 @@ export class LimitReachedError extends Error {
 // can still answer: worst case is 2 x 15s attempts = 30s of a 60s budget.
 export const AI_TIMEOUT_MS = 15000;
 
-// Backwards-compatible alias for older imports.
-export const GROQ_TIMEOUT_MS = AI_TIMEOUT_MS;
-
 // Prices in paise (₹1 = 100 paise). Single source of truth for order amounts.
 export const TIER_PRICES = {
   pro_monthly: 17900, // ₹179
@@ -54,7 +51,7 @@ export const TIER_PRICES = {
 
 export type Tier = keyof typeof TIER_PRICES;
 
-export const TIER_TO_PLAN: Record<Tier, PlanType> = {
+const TIER_TO_PLAN: Record<Tier, PlanType> = {
   pro_monthly: 'pro',
   pro_yearly: 'pro',
   ultimate_monthly: 'ultimate',

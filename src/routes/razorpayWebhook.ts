@@ -2,18 +2,22 @@ import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { db } from '../config/firebaseAdmin';
 import { razorpay } from '../services/razorpayClient';
-import {
-  grantPlanAndMarkPaid,
-  PAYMENTS_COLLECTION,
-} from '../services/subscriptionService';
+import { grantPlanAndMarkPaid, PAYMENTS_COLLECTION } from '../services/subscriptionService';
+import { timingSafeEqualHex } from '../utils/crypto';
 
 const WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
 
-function timingSafeEqualHex(expectedHex: string, receivedHex: string): boolean {
-  const expected = Buffer.from(expectedHex, 'hex');
-  const received = Buffer.from(receivedHex, 'hex');
-  if (expected.length !== received.length) return false;
-  return crypto.timingSafeEqual(expected, received);
+interface RazorpayWebhookEvent {
+  event?: string;
+  payload?: {
+    payment?: {
+      entity: {
+        id?: string;
+        order_id?: string;
+        amount?: number | string;
+      };
+    };
+  };
 }
 
 /** The subset of a Razorpay payment entity that we validate against. */
@@ -45,7 +49,7 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
     return;
   }
 
-  let event: any;
+  let event: RazorpayWebhookEvent | undefined;
   let rawBody: Buffer | string | null = null;
 
   if (Buffer.isBuffer(req.body) || typeof req.body === 'string') {
@@ -102,7 +106,7 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
   const orderId: string | undefined = payment?.order_id;
   const paymentId: string | undefined = payment?.id;
 
-  if (!orderId || !paymentId) {
+  if (!orderId || !paymentId || !payment) {
     res.status(400).json({ error: 'Invalid payment event' });
     return;
   }

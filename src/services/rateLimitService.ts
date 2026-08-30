@@ -1,5 +1,7 @@
 import { db } from '../config/firebaseAdmin';
 
+export const RATE_LIMITS_COLLECTION = 'rateLimits';
+
 export class RateLimitExceededError extends Error {
   constructor(public readonly retryAfterMs: number) {
     super('Rate limit exceeded');
@@ -20,7 +22,7 @@ export async function consumeRateLimit(
   max: number,
   windowMs: number
 ): Promise<void> {
-  const ref = db.collection('rateLimits').doc(key);
+  const ref = db.collection(RATE_LIMITS_COLLECTION).doc(key);
 
   try {
     await db.runTransaction(async (transaction) => {

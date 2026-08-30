@@ -10,17 +10,11 @@ import {
   PAYMENTS_COLLECTION,
 } from '../services/subscriptionService';
 import { tierToPlan } from '../constants';
+import { timingSafeEqualHex } from '../utils/crypto';
 
 const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const VERIFY_RATE_LIMIT_MAX = 20;
 const VERIFY_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
-
-function timingSafeEqualHex(expectedHex: string, receivedHex: string): boolean {
-  const expected = Buffer.from(expectedHex, 'hex');
-  const received = Buffer.from(receivedHex, 'hex');
-  if (expected.length !== received.length) return false;
-  return crypto.timingSafeEqual(expected, received);
-}
 
 /** The subset of a Razorpay payment entity that we validate against. */
 interface PaymentCheck {

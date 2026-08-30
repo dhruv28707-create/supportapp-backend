@@ -1,3 +1,5 @@
+import { Request, Response } from 'express';
+
 /**
  * CORS configuration.
  *
@@ -14,11 +16,6 @@
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:5173',
-  // Production frontends — safe to call the API by default so a missing
-  // ALLOWED_ORIGINS env var can never take the app down.
-  'https://supportapp-zeta.vercel.app',
-  'https://supportapp-backend.vercel.app',
-  // Main production site (Next.js frontend / web builds / webviews).
   'https://supportapp.in',
   'https://www.supportapp.in',
 ].join(',');
@@ -43,7 +40,7 @@ export function isOriginAllowed(origin: string | undefined): boolean {
  * CORS enforcement for plain Vercel-style (req, res) handlers.
  * Returns true if the request may proceed, false if a response was already sent.
  */
-export function enforceCors(req: any, res: any): boolean {
+export function enforceCors(req: Request, res: Response): boolean {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
