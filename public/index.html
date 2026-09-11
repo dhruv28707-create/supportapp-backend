@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAFESPACE API</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+      max-width: 720px;
+      margin: 3rem auto;
+      padding: 0 1.5rem;
+      background: #12141a;
+      color: #e6e8ee;
+      line-height: 1.6;
+    }
+    h1 { color: #7aa2f7; margin-bottom: 0.25rem; }
+    .tagline { color: #9aa1b2; margin-top: 0; }
+    code {
+      background: #1e2230;
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.92em; }
+    th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #262b3a; vertical-align: top; }
+    th { color: #9aa1b2; font-weight: 600; }
+    .method { font-weight: 700; }
+    .get { color: #9ece6a; }
+    .post { color: #e0af68; }
+    .auth-yes { color: #f7768e; }
+    .auth-no { color: #9aa1b2; }
+    footer { margin-top: 2rem; color: #9aa1b2; font-size: 0.88em; }
+  </style>
+</head>
+<body>
+  <h1>SAFESPACE</h1>
+  <p class="tagline">Emotional support chat with 12 AI personalities &mdash; backend service.</p>
+
+  <p>All endpoints live under <code>/api/*</code> and speak JSON. Errors use the shape
+  <code>{ "error": "message" }</code>.</p>
+
+  <table>
+    <tr><th>Endpoint</th><th>Auth</th><th>Purpose</th></tr>
+    <tr>
+      <td><span class="method get">GET</span> <code>/api/health</code></td>
+      <td class="auth-no">none</td>
+      <td>Liveness check.</td>
+    </tr>
+    <tr>
+      <td><span class="method post">POST</span> <code>/api/chat</code></td>
+      <td class="auth-yes">Bearer token</td>
+      <td>Chat with an AI persona. Body: <code>{ message, personality?, religionSubType? }</code>.</td>
+    </tr>
+    <tr>
+      <td><span class="method get">GET</span> <code>/api/user/plan</code></td>
+      <td class="auth-yes">Bearer token</td>
+      <td>Current plan and remaining messages.</td>
+    </tr>
+    <tr>
+      <td><span class="method post">POST</span> <code>/api/payment-order</code></td>
+      <td class="auth-yes">Bearer token</td>
+      <td>Create a Razorpay order for a subscription tier.</td>
+    </tr>
+    <tr>
+      <td><span class="method post">POST</span> <code>/api/payment-verify</code></td>
+      <td class="auth-yes">Bearer token</td>
+      <td>Verify a completed Razorpay checkout and activate the plan.</td>
+    </tr>
+    <tr>
+      <td><span class="method post">POST</span> <code>/api/webhooks/razorpay</code></td>
+      <td class="auth-no">HMAC signature</td>
+      <td>Razorpay webhook (server-to-server only).</td>
+    </tr>
+  </table>
+
+  <p>Authentication uses a Firebase ID token:
+  <code>Authorization: Bearer &lt;idToken&gt;</code></p>
+
+  <footer>See the repository README for the full API reference and setup guide.</footer>
+</body>
+</html>
