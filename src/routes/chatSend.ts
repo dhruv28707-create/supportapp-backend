@@ -45,8 +45,8 @@ const FALLBACK: ModelTarget = {
   extraBody: { reasoning_effort: 'low' },
 };
 // Both models are plain instruct models (no hidden reasoning tokens), so the
-// budget goes straight to the visible reply. The system prompt asks for 2-4
-// short sentences (~120 tokens); 600 is a generous ceiling (roughly 450 words)
+// budget goes straight to the visible reply. The system prompt asks for
+// short, human-scale replies (mostly 1-3 sentences); 600 is a generous ceiling
 // that still caps runaway responses without mid-sentence truncation.
 const MAX_TOKENS = 600;
 const MAX_MESSAGE_LENGTH = 4000;
