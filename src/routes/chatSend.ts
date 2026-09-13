@@ -93,7 +93,7 @@ async function callModel(
     const data = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    return { ok: true, reply: data.choices?.[0]?.message?.content?.trim() || '' };
+    return { ok: true, reply: data.choices?.[0]?.message?.content?.trim() ?? '' };
   } catch (error) {
     return { ok: false, status: undefined, errorData: error };
   } finally {

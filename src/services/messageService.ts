@@ -114,7 +114,7 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
  */
 export async function checkMessageQuota(uid: string): Promise<UserMessageState> {
   return await db.runTransaction(async (transaction) => {
-    const { state, ref } = await loadSubscriptionState(transaction, uid);
+    const { state } = await loadSubscriptionState(transaction, uid);
     const now = Date.now();
 
     const active = applyExpiry(state, now);

@@ -93,6 +93,8 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
     // Idempotency: a replayed verify (e.g. client retry after a network drop)
     // succeeds with the already-granted result instead of erroring, so the
     // client never shows a failure for a payment that actually went through.
+    // Expiry is recomputed from paidAt (when the plan actually started), NOT
+    // from now — a retry weeks later must still report the same date.
     if (record.status === 'paid') {
       const plan = tierToPlan(record.tier);
       if (!plan) {
@@ -100,7 +102,11 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
         res.status(500).json({ error: 'Internal server error' });
         return;
       }
-      const expiresAtMs = computeExpiresAtMs(record.tier);
+      const paidAtMs = record.paidAt ? new Date(record.paidAt as string | number | Date).getTime() : null;
+      const expiresAtMs =
+        paidAtMs !== null && !Number.isNaN(paidAtMs)
+          ? computeExpiresAtMs(record.tier, paidAtMs)
+          : computeExpiresAtMs(record.tier);
       res.json({
         success: true,
         plan,

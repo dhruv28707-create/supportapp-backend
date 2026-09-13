@@ -47,7 +47,7 @@ export function enforceCors(req: Request, res: Response): boolean {
     'Content-Type, Authorization, x-razorpay-signature'
   );
 
-  const origin = req.headers?.origin as string | undefined;
+  const origin = req.headers?.origin;
 
   // Non-browser requests (mobile, curl, server-to-server) carry no Origin.
   if (!origin) return true;

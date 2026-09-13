@@ -22,7 +22,8 @@ Other scripts:
 | Script | What it does |
 |---|---|
 | `npm run build` | Compile `src/` → `dist/` |
-| `npm run lint` | Type-check without emitting (`tsc --noEmit`) |
+| `npm run lint` | Lint `src/` with ESLint (includes type-aware rules) |
+| `npm run typecheck` | Type-check without emitting (`tsc --noEmit`) |
 | `npm run sanity` | Run `scripts/sanity-check.ts` (verifies tier prices/mappings) |
 | `npm start` | Run the compiled Express app from `dist/` |
 

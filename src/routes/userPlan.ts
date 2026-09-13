@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import { checkAndResetOnly } from '../services/messageService';
-import { PLAN_CONFIG, PlanType } from '../constants';
+import { PLAN_CONFIG } from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 
 export async function getUserPlanHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
