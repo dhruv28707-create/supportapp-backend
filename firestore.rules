@@ -27,11 +27,12 @@ service cloud.firestore {
       allow get: if isOwner(uid);
 
       // Self-signup creation: a NEW profile must start as tier 'free' and
-      // may not set any protected server-managed fields. Prevents a client
-      // from self-promoting to paid/admin at creation time.
+      // may not set any protected server-managed fields (tier is required and
+      // checked here; every other protected field must be absent entirely).
+      // Prevents a client from self-promoting to paid/admin at creation time.
       allow create: if isOwner(uid)
                     && request.resource.data.tier == 'free'
-                    && !touchesProtectedUserFields();
+                    && !createTouchesProtectedFields();
 
       // Owner can update their own doc, but never the fields that control
       // access or identity: tier, plan, role, isDeveloper, premium, quota
@@ -99,8 +100,7 @@ service cloud.firestore {
     }
 
     // Fields the client may never create or mutate on its own user doc.
-    // If the write's data differs from the existing doc on any of these,
-    // the whole write is rejected.
+    // If a write changes any of these, the whole write is rejected.
     function protectedUserFields() {
       return [
         'tier', 'plan', 'role', 'isDeveloper', 'developer', 'premium',
@@ -109,6 +109,23 @@ service cloud.firestore {
       ];
     }
 
+    // The same list minus 'tier'. On CREATE there is no existing doc, so
+    // `resource.data` is unavailable and we can't diff; instead require that
+    // none of these fields appear in the new document at all (tier itself is
+    // separately required to be present and 'free' by the create rule).
+    function protectedUserFieldsExceptTier() {
+      return [
+        'plan', 'role', 'isDeveloper', 'developer', 'premium',
+        'isAdmin', 'admin', 'messageCount', 'messagesUsed', 'expiresAt',
+        'razorpayOrderId', 'lastOrderId', 'subscriptionStatus',
+      ];
+    }
+
+    function createTouchesProtectedFields() {
+      return request.resource.data.keys().hasAny(protectedUserFieldsExceptTier());
+    }
+
+    // On UPDATE the pre-write doc exists, so diff old vs new state.
     function touchesProtectedUserFields() {
       return request.resource.data.diff(resource.data)
              .affectedKeys().hasAny(protectedUserFields());
