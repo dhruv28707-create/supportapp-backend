@@ -11,6 +11,7 @@ import { chatSendHandler } from './routes/chatSend';
 import { razorpayWebhookHandler } from './routes/razorpayWebhook';
 import { paymentOrderHandler } from './routes/paymentOrder';
 import { paymentVerifyHandler } from './routes/paymentVerify';
+import { deleteAccountHandler } from './routes/accountDelete';
 import { diagnoseHandler } from './routes/diagnose';
 import { isOriginAllowed } from './config/cors';
 import { db } from './config/firebaseAdmin';
@@ -53,6 +54,8 @@ app.post('/api/chat/send', authMiddleware, chatSendHandler);
 
 app.post('/api/payment-order', authMiddleware, paymentOrderHandler);
 app.post('/api/payment-verify', authMiddleware, paymentVerifyHandler);
+
+app.delete('/api/account', authMiddleware, deleteAccountHandler);
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error('Unhandled error:', err);

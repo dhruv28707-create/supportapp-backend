@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { enforceCors } from './config/cors';
 import { authMiddleware, AuthenticatedRequest } from './middleware/authMiddleware';
 
+type HttpMethod = 'GET' | 'POST' | 'DELETE';
+
 type RouteHandler = (req: AuthenticatedRequest, res: Response) => Promise<void> | void;
 
 /**
@@ -9,7 +11,7 @@ type RouteHandler = (req: AuthenticatedRequest, res: Response) => Promise<void> 
  * endpoint needs: CORS enforcement, OPTIONS preflight handling, and a
  * method check. The route handler runs without authentication.
  */
-export function publicEndpoint(method: 'GET' | 'POST', routeHandler: RouteHandler) {
+export function publicEndpoint(method: HttpMethod, routeHandler: RouteHandler) {
   return async function handler(req: Request, res: Response): Promise<void> {
     if (!enforceCors(req, res)) return;
 
@@ -31,7 +33,7 @@ export function publicEndpoint(method: 'GET' | 'POST', routeHandler: RouteHandle
  * Same as publicEndpoint, but verifies the Firebase ID token first and only
  * then delegates to the route handler.
  */
-export function protectedEndpoint(method: 'GET' | 'POST', routeHandler: RouteHandler) {
+export function protectedEndpoint(method: HttpMethod, routeHandler: RouteHandler) {
   return async function handler(req: Request, res: Response): Promise<void> {
     if (!enforceCors(req, res)) return;
 

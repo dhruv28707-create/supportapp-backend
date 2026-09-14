@@ -67,8 +67,10 @@ Request body:
 | Field | Rules |
 |---|---|
 | `message` | Required string, 1–4000 chars. Legacy clients may instead send `messages: [...]` (OpenAI-style); only the latest user turn is used — there is no server-side conversation memory. |
-| `personality` | Optional. One of `Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`, `Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`. Omitted → defaults to `Friend`. Invalid value → **400** with the list of valid options. |
+| `personality` | Optional. One of `Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`, `Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`. Omitted → defaults to `Friend`. Invalid value → **400** with the list of valid options. `Guide_<religion>` (e.g. `Guide_hindu`) is accepted as an alias for `personality: "Guide"` + `religionSubType` |
 | `religionSubType` | Optional. Only used when `personality` is `Guide`. One of `islamic`, `hindu`, `christian`, `buddhist`, `jewish`, `spiritual`, `secular`. Invalid value → 400. |
+
+**Persona gating is enforced server-side.** Free plans can use the family & friend personas (`Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`); the rest (`Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`) require an active pro/ultimate plan. A locked persona returns **403** `{ code: 'persona_locked', plan, personality }` and consumes no quota. The frontend's UI locks are cosmetic only.
 
 Success response:
 
@@ -88,8 +90,9 @@ Errors:
 | Status | Meaning |
 |---|---|
 | 400 | Missing/invalid message, personality, or religionSubType |
-| 429 | Message quota exhausted → `{ limitReached: true, nextRefreshAt }` (epoch ms) |
-| 503 | AI upstream unavailable (`code: 'ai_key_missing'` or `'ai_upstream_error'`) |
+| 403 | Persona not allowed on the user's plan (`code: 'persona_locked'`) |
+| 429 | Message quota exhausted → `{ limitReached: true, nextRefreshAt }` (epoch ms) — also used by the abuse rate limiter (30 requests / 5 min / user, fail-open) |
+| 503 | AI upstream unavailable (`code: 'ai_key_missing'` or `'ai_upstream_error'`) — quota is never consumed on 503 | |
 
 Quota is consumed **only** after a successful AI reply.
 
@@ -148,7 +151,15 @@ Errors: 400 (missing fields, bad signature, not captured, order/amount mismatch)
 
 ### POST /api/webhooks/razorpay
 
-Server-to-server webhook. Verifies the HMAC-SHA256 signature over the raw body and grants plans authoritatively. Non-2xx responses trigger Razorpay retries.
+Server-to-server webhook. Verifies the HMAC-SHA256 signature over the raw body and grants plans authoritatively. Non-2xx responses trigger Razorpay retries. Processing is idempotent: a webhook and a client verify racing on the same order grant exactly once (atomic transactional status flip), and replays return `alreadyProcessed: true` / `alreadyVerified: true` without re-granting or resetting quota.
+
+### DELETE /api/account
+
+Delete the authenticated user's account server-side. **Auth required** (uid comes from the verified Firebase token — one user can never delete another's data). Rate limited to 3 / hour.
+
+- **409** `{ code: 'active_subscription', expiresAt }` — deletion is blocked while a paid subscription is active. The user must cancel/let it expire or contact support per the refund policy; deletion must not silently bypass payment obligations.
+- **200** on success: deletes `subscriptions/{uid}`, the `users/{uid}` profile doc, rate-limit counters and pending payment orders; **anonymizes** paid payment rows (financial records are kept, uid redacted); revokes all Firebase refresh tokens (existing ID tokens stop verifying within minutes) and deletes the Firebase Auth account (no-op if the client already called `currentUser.delete()`).
+- The frontend may still do its client-side cleanup + `currentUser.delete()` first; this endpoint is the server-side guarantee that server data and API access are gone.
 
 ### GET /api/diagnose
 
@@ -164,3 +175,10 @@ Diagnostics — **disabled by default.** Set `ENABLE_DIAGNOSE=true` to enable (d
 ## Environment variables
 
 See [.env.example](./.env.example) for the annotated full list (Firebase Admin, OpenRouter/Groq keys with optional model overrides, Razorpay keys/webhook secret, `ALLOWED_ORIGINS`, `ENABLE_DIAGNOSE`). The example file contains no real secrets; never commit `.env`.
+
+## Security model
+
+- **Secrets** live only in server-side env vars (`.env` locally, Vercel dashboard in production). `.env` is git-ignored; a full-history scan pattern check is recommended after any suspected leak, and any leaked key must be rotated (Razorpay keys in the Razorpay dashboard, Firebase keys in Google Cloud, AI keys with their providers).
+- **Auth**: every protected endpoint verifies the Firebase ID token (`Authorization: Bearer <token>`, revocation-checked); `uid` is always derived from the token, never from request data. Missing/invalid → **401**; authenticated but not authorized for the resource → **403**.
+- **Plan trust**: plan/quota state lives in the server-only `subscriptions` collection and is granted exclusively through signature-verified payments (checkout verify + webhook, both cross-checked against Razorpay's API). A client-writable `users/{uid}` doc can never grant premium by itself.
+- **Firestore rules** ([firestore.rules](./firestore.rules)): no god-account/developer override; `users/{uid}` protects `tier`/`plan`/`role`/`isDeveloper`/`premium`/quota fields from client mutation; `payments` and `subscriptions` are server-only writes; anything not explicitly matched is denied. Deploy with `firebase deploy --only firestore:rules`.

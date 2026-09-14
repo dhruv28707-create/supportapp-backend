@@ -25,6 +25,27 @@ export const PERSONALITIES = [
 
 export type PersonalityType = (typeof PERSONALITIES)[number];
 
+/**
+ * Plan-based persona gating, enforced SERVER-SIDE in the chat handler
+ * (src/routes/chatSend.ts). The frontend's UI locks are cosmetic only.
+ *
+ * Family + friend personas are free; the rest require a paid plan.
+ * If this list ever changes, keep it in sync with the frontend's plan screen.
+ */
+export const FREE_PERSONALITIES: readonly string[] = [
+  'Father',
+  'Mother',
+  'Sister',
+  'Brother',
+  'Friend',
+  'Best Friend',
+];
+
+export function isPersonalityAllowed(plan: PlanType, personality: string): boolean {
+  if (plan !== DEFAULT_PLAN) return true; // every paid plan unlocks all personas
+  return FREE_PERSONALITIES.includes(personality);
+}
+
 export class LimitReachedError extends Error {
   constructor(
     public readonly nextRefreshAt: number,

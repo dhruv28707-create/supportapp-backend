@@ -1,0 +1,117 @@
+rules_version = '2';
+
+// SAFESPACE Firestore security rules.
+//
+// Deploy with:  firebase deploy --only firestore:rules
+// (requires a firebase.json entry pointing at this file, or paste the same
+// content into Firebase Console > Firestore > Rules).
+//
+// Design notes:
+// - There is NO god-account / developer-email / isDeveloper override. Admin
+//   access belongs to the Admin SDK (server code), which bypasses these
+//   rules entirely — that is the only privileged path.
+// - Everything not explicitly matched below is DENIED. Do not add a catch
+//   -all "admin-only" fallback: a deliberate deny is louder than a silent
+//   one and never hides access bugs.
+// - Client-writable docs must never be able to grant premium access. Plan
+//   state lives in `subscriptions` and `payments`, which only the Admin SDK
+//   writes. See src/services/messageService.ts / subscriptionService.ts.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------
+    // users/{uid} — the user's own profile.
+    // ---------------------------------------------------------------
+    match /users/{uid} {
+      // Owner can read their own doc.
+      allow get: if isOwner(uid);
+
+      // Self-signup creation: a NEW profile must start as tier 'free' and
+      // may not set any protected server-managed fields. Prevents a client
+      // from self-promoting to paid/admin at creation time.
+      allow create: if isOwner(uid)
+                    && request.resource.data.tier == 'free'
+                    && !touchesProtectedUserFields();
+
+      // Owner can update their own doc, but never the fields that control
+      // access or identity: tier, plan, role, isDeveloper, premium, quota
+      // counters, expiry, payment references. Those belong to the backend.
+      allow update: if isOwner(uid)
+                    && !touchesProtectedUserFields();
+
+      // Owner may delete their own profile doc (account deletion support).
+      allow delete: if isOwner(uid);
+
+      // Nobody can LIST users — one user's data is only reachable by that
+      // user, never by queries across the collection.
+      allow list: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // payments/{orderId} — financial records. Server/admin only writes.
+    // ---------------------------------------------------------------
+    match /payments/{orderId} {
+      // The owner of an order can read that single order doc (their own
+      // receipt). All writes — including the status:'paid' grant — come from
+      // the Admin SDK (webhook / payment-verify), which bypasses these rules.
+      allow get: if isOwner(resource.data.uid);
+
+      // No client-side create/update/delete: order creation, verification
+      // and grant all happen server-side via the API.
+      // Deliberately NOT even a signed-in-list guard here: list is denied so
+      // no user can ever enumerate other users' payments.
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // subscriptions/{uid} — server-only plan/quota state.
+    // ---------------------------------------------------------------
+    match /subscriptions/{uid} {
+      // Fully inaccessible to clients: the backend reads/writes it with the
+      // Admin SDK. Exposing it would let clients see internal quota logic
+      // and tempt them into writing it — plan trust must stay server-side.
+      allow read, write: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // rateLimits/{key} — abuse counters keyed like "chat:<uid>".
+    // ---------------------------------------------------------------
+    match /rateLimits/{docId} {
+      // Server-only, like subscriptions.
+      allow read, write: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // Anything else — explicit deny.
+    // ---------------------------------------------------------------
+    // New collections must be added above with deliberate per-collection
+    // rules. This match makes the default loud: every unlisted collection
+    // denies clients entirely instead of silently relying on some broad
+    // fallback.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ------------------------- helpers ------------------------------
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Fields the client may never create or mutate on its own user doc.
+    // If the write's data differs from the existing doc on any of these,
+    // the whole write is rejected.
+    function protectedUserFields() {
+      return [
+        'tier', 'plan', 'role', 'isDeveloper', 'developer', 'premium',
+        'isAdmin', 'admin', 'messageCount', 'messagesUsed', 'expiresAt',
+        'razorpayOrderId', 'lastOrderId', 'subscriptionStatus',
+      ];
+    }
+
+    function touchesProtectedUserFields() {
+      return request.resource.data.diff(resource.data)
+             .affectedKeys().hasAny(protectedUserFields());
+    }
+  }
+}

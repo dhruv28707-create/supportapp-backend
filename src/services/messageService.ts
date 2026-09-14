@@ -138,6 +138,19 @@ export async function checkMessageQuota(uid: string): Promise<UserMessageState> 
 }
 
 /**
+ * Reads the user's effective plan (with expiry applied) without consuming
+ * anything or writing to Firestore. Used by read-only decisions such as
+ * server-side persona gating in the chat handler.
+ */
+export async function getPlanState(uid: string): Promise<UserMessageState> {
+  return await db.runTransaction(async (transaction) => {
+    const { state } = await loadSubscriptionState(transaction, uid);
+    const active = applyExpiry(state, Date.now());
+    return { plan: active.plan, messageCount: active.messageCount, lastResetAt: active.lastResetAt };
+  });
+}
+
+/**
  * Consumes one message from the user's quota. Throws LimitReachedError when
  * the limit is hit. Call this only AFTER a successful AI reply so that failed
  * AI calls do not burn the user's message allowance.

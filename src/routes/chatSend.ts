@@ -1,10 +1,21 @@
 import { Response } from 'express';
-import { PersonalityType, PERSONALITIES } from '../constants';
+import {
+  PersonalityType,
+  PERSONALITIES,
+  LimitReachedError,
+  AI_TIMEOUT_MS,
+  isPersonalityAllowed,
+  PlanType,
+} from '../constants';
 import { buildSystemPrompt, RELIGION_KEYS } from '../services/promptService';
-import { checkMessageQuota, consumeMessage } from '../services/messageService';
-import { LimitReachedError } from '../constants';
+import { consumeMessage, getPlanState } from '../services/messageService';
+import { consumeRateLimit, RateLimitExceededError } from '../services/rateLimitService';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
-import { AI_TIMEOUT_MS } from '../constants';
+
+// Abuse backstop on top of the plan quota: a stolen ID token or a scripted
+// client cannot hammer the AI providers. Fail-open like the payment limiters.
+const CHAT_RATE_LIMIT_MAX = 30;
+const CHAT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -102,6 +113,7 @@ async function callModel(
 }
 
 export async function chatSendHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
+  // uid is always taken from the verified Firebase token — never from the body/query.
   const uid = req.user!.uid;
   const body = (req.body || {}) as {
     message?: unknown;
@@ -152,7 +164,17 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
   // personality is rejected (consistent with religionSubType) so clients get
   // clear feedback instead of silently talking to a different persona.
   let personality: PersonalityType = 'Friend';
-  if (body.personality !== undefined) {
+  let religionSubType: string | undefined =
+    typeof body.religionSubType === 'string' ? body.religionSubType : undefined;
+
+  // Frontend compat: "Guide_<religion>" (e.g. "Guide_hindu") selects the Guide
+  // persona with that faith overlay in one field. Normalize it server-side.
+  const guideAlias =
+    typeof body.personality === 'string' && body.personality.startsWith('Guide_')
+      ? body.personality
+      : null;
+
+  if (body.personality !== undefined && !guideAlias) {
     if (
       typeof body.personality !== 'string' ||
       !PERSONALITIES.includes(body.personality as PersonalityType)
@@ -165,15 +187,28 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
     personality = body.personality as PersonalityType;
   }
 
+  if (guideAlias) {
+    personality = 'Guide';
+    const aliasReligion = guideAlias.slice('Guide_'.length).toLowerCase();
+    if (RELIGION_KEYS.includes(aliasReligion)) {
+      religionSubType = aliasReligion;
+    }
+    // Unknown Guide_<x> suffix: keep Guide without a faith layer (buildSystemPrompt
+    // already handles a missing/unknown subtype via its spiritual fallback). To
+    // stay strict about what reaches the system prompt, pass undefined when the
+    // suffix isn't a known religion key.
+    else {
+      religionSubType = undefined;
+    }
+  }
+
   // religionSubType is user input injected into the system prompt — allowlist only.
-  if (body.religionSubType !== undefined) {
-    if (
-      typeof body.religionSubType !== 'string' ||
-      !RELIGION_KEYS.includes(body.religionSubType.toLowerCase())
-    ) {
+  if (religionSubType !== undefined) {
+    if (!RELIGION_KEYS.includes(religionSubType.toLowerCase())) {
       res.status(400).json({ error: 'Invalid religionSubType' });
       return;
     }
+    religionSubType = religionSubType.toLowerCase();
   }
 
   // --- Env guard (fail with a clear error instead of a crash) ---
@@ -183,24 +218,44 @@ export async function chatSendHandler(req: AuthenticatedRequest, res: Response):
     return;
   }
 
-  // --- Message quota check (does NOT consume yet; consumed only on AI success) ---
+  // --- Server-side persona gating (the frontend UI lock is cosmetic) ---
+  // A 403 here must NOT consume quota and must NOT call any AI provider.
+  let plan: PlanType;
   try {
-    await checkMessageQuota(uid);
+    plan = (await getPlanState(uid)).plan;
   } catch (error) {
-    if (error instanceof LimitReachedError) {
-      res.status(429).json({
-        limitReached: true,
-        nextRefreshAt: error.nextRefreshAt,
-      });
-      return;
-    }
-    console.error(`[chat uid=${uid}] Message quota check failed:`, error);
+    console.error(`[chat uid=${uid}] Plan lookup failed:`, error);
     res.status(500).json({ error: 'Internal server error' });
     return;
   }
+  if (!isPersonalityAllowed(plan, personality)) {
+    res.status(403).json({
+      error: `The ${personality} personality requires a Pro plan. Upgrade to unlock it.`,
+      code: 'persona_locked',
+      plan,
+      personality,
+    });
+    return;
+  }
 
-  const religionSubType =
-    typeof body.religionSubType === 'string' ? body.religionSubType : undefined;
+  // --- Abuse rate limit (independent of the plan message quota) ---
+  // Fail-open on limiter storage errors (consistent with the payment
+  // limiters): availability beats throttling when the limiter itself is
+  // broken — plan quota below still caps usage.
+  try {
+    await consumeRateLimit(`chat:${uid}`, CHAT_RATE_LIMIT_MAX, CHAT_RATE_LIMIT_WINDOW_MS);
+  } catch (error) {
+    if (error instanceof RateLimitExceededError) {
+      res.status(429).json({
+        limitReached: true,
+        error: 'Too many requests, try again later',
+        nextRefreshAt: Date.now() + error.retryAfterMs,
+      });
+      return;
+    }
+    console.error(`[chat uid=${uid}] Rate limit check failed (allowing request):`, error);
+  }
+
   const systemPrompt = buildSystemPrompt(personality, religionSubType);
   const messages = [
     { role: 'system' as const, content: systemPrompt },

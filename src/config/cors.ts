@@ -41,7 +41,7 @@ export function isOriginAllowed(origin: string | undefined): boolean {
  * Returns true if the request may proceed, false if a response was already sent.
  */
 export function enforceCors(req: Request, res: Response): boolean {
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
     'Content-Type, Authorization, x-razorpay-signature'

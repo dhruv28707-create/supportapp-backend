@@ -18,9 +18,16 @@ export async function authMiddleware(
   }
 
   const token = authHeader.split('Bearer ')[1];
+  if (!token) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
 
   try {
-    const decodedToken = await auth.verifyIdToken(token);
+    // checkRevoked: true rejects tokens issued before a user's tokens were
+    // revoked (auth.revokeRefreshTokens) — this is what makes account
+    // deletion able to invalidate future API access for stolen/old tokens.
+    const decodedToken = await auth.verifyIdToken(token, true);
     req.user = {
       uid: decodedToken.uid,
       email: decodedToken.email || '',
