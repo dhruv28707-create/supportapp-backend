@@ -69,6 +69,11 @@
       <td>Verify a completed Razorpay checkout and activate the plan.</td>
     </tr>
     <tr>
+      <td><span class="method post">POST</span> <code>/api/payment-cancel</code></td>
+      <td class="auth-yes">Bearer token</td>
+      <td>Cancel the active subscription (immediate). No body.</td>
+    </tr>
+    <tr>
       <td><span class="method post">POST</span> <code>/api/webhooks/razorpay</code></td>
       <td class="auth-no">HMAC signature</td>
       <td>Razorpay webhook (server-to-server only).</td>

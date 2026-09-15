@@ -11,6 +11,7 @@ import { chatSendHandler } from './routes/chatSend';
 import { razorpayWebhookHandler } from './routes/razorpayWebhook';
 import { paymentOrderHandler } from './routes/paymentOrder';
 import { paymentVerifyHandler } from './routes/paymentVerify';
+import { paymentCancelHandler } from './routes/paymentCancel';
 import { deleteAccountHandler } from './routes/accountDelete';
 import { diagnoseHandler } from './routes/diagnose';
 import { isOriginAllowed } from './config/cors';
@@ -54,6 +55,7 @@ app.post('/api/chat/send', authMiddleware, chatSendHandler);
 
 app.post('/api/payment-order', authMiddleware, paymentOrderHandler);
 app.post('/api/payment-verify', authMiddleware, paymentVerifyHandler);
+app.post('/api/payment-cancel', authMiddleware, paymentCancelHandler);
 
 app.delete('/api/account', authMiddleware, deleteAccountHandler);
 

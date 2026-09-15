@@ -149,6 +149,17 @@ Response:
 
 Errors: 400 (missing fields, bad signature, not captured, order/amount mismatch), 403 (order belongs to another user), 404 (unknown order), 502 (Razorpay API unreachable).
 
+### POST /api/payment-cancel
+
+Cancel the authenticated user's subscription so the Delete Account flow is unblocked. **Auth required.** No body. Rate limited to 6 / 10 min / user.
+
+This backend's payments are one-time Razorpay orders — there is no Razorpay subscription entity and nothing auto-renews, so cancellation is a server-side state change only.
+
+- **No active subscription** (no doc, already cancelled, free plan, or expired): **200** `{ ok: true, message: "No active subscription found" }` — deliberately not an error, so the call is idempotent.
+- **Active subscription**: cancelled **immediately** — `subscriptions/{uid}` gets `status: "cancelled"`, `plan` drops to `free` and `expiresAt` is cleared — and returns **200** `{ ok: true, message: "Subscription cancelled" }`. Paid perks end now; time already paid is forfeited.
+- A **cancelled subscription no longer blocks `DELETE /api/account`**. Re-paying later re-grants normally (`status` flips back to `active`).
+- If a `razorpaySubscriptionId` is ever present on the record (future recurring plans), the Razorpay cancel API is attempted best-effort first; its failure is logged and never blocks the local cancellation. Razorpay keys (`RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`) stay server-side and are never exposed.
+
 ### POST /api/webhooks/razorpay
 
 Server-to-server webhook. Verifies the HMAC-SHA256 signature over the raw body and grants plans authoritatively. Non-2xx responses trigger Razorpay retries. Processing is idempotent: a webhook and a client verify racing on the same order grant exactly once (atomic transactional status flip), and replays return `alreadyProcessed: true` / `alreadyVerified: true` without re-granting or resetting quota.
@@ -157,7 +168,7 @@ Server-to-server webhook. Verifies the HMAC-SHA256 signature over the raw body a
 
 Delete the authenticated user's account server-side. **Auth required** (uid comes from the verified Firebase token — one user can never delete another's data). Rate limited to 3 / hour.
 
-- **409** `{ code: 'active_subscription', expiresAt }` — deletion is blocked while a paid subscription is active. The user must cancel/let it expire or contact support per the refund policy; deletion must not silently bypass payment obligations.
+- **409** `{ code: 'active_subscription', expiresAt }` — deletion is blocked while a paid subscription is **active**. The user must cancel first via `POST /api/payment-cancel` (immediate downgrade), let it expire, or contact support per the refund policy; deletion must not silently bypass payment obligations. A cancelled subscription no longer blocks deletion.
 - **200** on success: deletes `subscriptions/{uid}`, the `users/{uid}` profile doc, rate-limit counters and pending payment orders; **anonymizes** paid payment rows (financial records are kept, uid redacted); revokes all Firebase refresh tokens (existing ID tokens stop verifying within minutes) and deletes the Firebase Auth account (no-op if the client already called `currentUser.delete()`).
 - The frontend may still do its client-side cleanup + `currentUser.delete()` first; this endpoint is the server-side guarantee that server data and API access are gone.
 

@@ -1,6 +1,10 @@
 import { db } from '../config/firebaseAdmin';
 import { auth } from '../config/firebaseAdmin';
-import { SUBSCRIPTIONS_COLLECTION, PAYMENTS_COLLECTION } from './subscriptionService';
+import {
+  SUBSCRIPTIONS_COLLECTION,
+  PAYMENTS_COLLECTION,
+  normalizeStatus,
+} from './subscriptionService';
 import { RATE_LIMITS_COLLECTION } from './rateLimitService';
 
 /**
@@ -11,8 +15,9 @@ import { RATE_LIMITS_COLLECTION } from './rateLimitService';
  *    verified Firebase ID token; there is no admin override path here).
  *  - An ACTIVE paid subscription blocks deletion (HTTP 409) so deletion
  *    cannot be used to silently walk away from a paid term. The user must
- *    cancel / let it expire first (contact support for refunds per the
- *    app's stated policy).
+ *    cancel first via POST /api/payment-cancel (which downgrades the plan
+ *    immediately), let it expire, or contact support for refunds per the
+ *    app's stated policy.
  *  - Otherwise: server-side data (subscriptions, rate-limit counters, the
  *    users/{uid} profile doc, and any pending payment records owned by the
  *    user) is deleted. Paid payment history rows are NOT deleted — they are
@@ -149,6 +154,11 @@ export async function getActiveSubscriptionExpiry(uid: string): Promise<string |
 
   const data = snap.data() || {};
   if (!data.plan || data.plan === 'free') return null;
+
+  // A cancelled subscription no longer blocks deletion: the user went through
+  // POST /api/payment-cancel (or the doc was already flipped). Only an ACTIVE
+  // paid term is a reason to refuse deleting the account.
+  if (normalizeStatus(data.status) === 'cancelled') return null;
 
   const expires = data.expiresAt;
   let expiresMs: number | null = null;

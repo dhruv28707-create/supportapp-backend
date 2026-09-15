@@ -1,6 +1,6 @@
 import { db } from '../config/firebaseAdmin';
 import { DocumentData } from 'firebase-admin/firestore';
-import { tierToPlan, PlanType } from '../constants';
+import { tierToPlan, PlanType, DEFAULT_PLAN } from '../constants';
 
 /** Fields written by grantPlanAndMarkPaid into the payments doc (merge). */
 interface PaidPaymentFields {
@@ -21,6 +21,19 @@ interface PaidPaymentFields {
  */
 export const SUBSCRIPTIONS_COLLECTION = 'subscriptions';
 export const PAYMENTS_COLLECTION = 'payments';
+
+/** Subscription status lifecycle on subscriptions/{uid}:
+ *  - active:    granted by payment (no explicit field = active)
+ *  - cancelled: user cancelled (POST /api/payment-cancel); perks end now
+ *
+ *  (Expiry to 'free' is handled separately by applyExpiry in messageService.)
+ */
+export type SubscriptionStatus = 'active' | 'cancelled';
+
+/** Normalizes a stored status value, treating missing/unknown as 'active'. */
+export function normalizeStatus(value: unknown): SubscriptionStatus {
+  return value === 'cancelled' ? 'cancelled' : 'active';
+}
 
 /** Expiry timestamp (ms) for a tier — 1 year for yearly, 1 month otherwise. */
 export function computeExpiresAtMs(
@@ -107,6 +120,9 @@ export async function grantPlanAndMarkPaid(
       db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid),
       {
         plan: effectivePlan,
+        // Re-grant after a cancel must clear the cancelled marker, or the new
+        // paid plan would still read as cancelled downstream.
+        status: 'active',
         expiresAt,
         messageCount: 0,
         lastResetAt: now,
@@ -122,4 +138,52 @@ export async function grantPlanAndMarkPaid(
   });
 
   return grantedPlan;
+}
+
+/**
+ * Cancels the user's subscription: plan drops to free and perks end now
+ * (immediate mode, per the Delete Account flow this endpoint serves).
+ *
+ * Idempotent: cancelling an already-cancelled/absent subscription changes
+ * nothing. Returns whether an active subscription was actually cancelled.
+ *
+ * Note: this backend's payments are one-time Razorpay orders, so there is
+ * normally no Razorpay subscription entity to cancel — this only flips the
+ * local state. If a Razorpay subscription id is ever present on the record
+ * (future recurring plans), the caller cancels it with the Razorpay API
+ * BEFORE calling this; its failure must not block the local cancellation.
+ */
+export async function cancelUserSubscription(uid: string): Promise<boolean> {
+  const now = Date.now();
+
+  return await db.runTransaction(async (transaction) => {
+    const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
+    const snap = await transaction.get(subRef);
+
+    if (!snap.exists) return false;
+
+    const data = snap.data() || {};
+    // Only a doc that actually carries a paid plan is cancellable; a free
+    // plan (or an expired one already downgraded to free) has nothing active.
+    if (normalizeStatus(data.status) !== 'active' || data.plan === DEFAULT_PLAN) {
+      return false;
+    }
+
+    transaction.set(
+      subRef,
+      {
+        plan: DEFAULT_PLAN,
+        status: 'cancelled',
+        expiresAt: null,
+        messageCount: typeof data.messageCount === 'number' ? data.messageCount : 0,
+        lastResetAt: typeof data.lastResetAt === 'number' ? data.lastResetAt : now,
+        lastOrderId: typeof data.lastOrderId === 'string' ? data.lastOrderId : null,
+        cancelledAt: new Date(now),
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return true;
+  });
 }
