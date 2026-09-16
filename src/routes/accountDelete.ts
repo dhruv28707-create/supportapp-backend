@@ -15,7 +15,7 @@ const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 /**
  * DELETE /api/account
  *
- * Deletes the authenticated user's server-side account data and revokes
+ * Deletes the authenticated user's server-side data and revokes
  * their Firebase tokens (existing ID tokens stop working within minutes).
  *
  * The full server-side wipe covers: the subscriptions/{uid} doc, the
@@ -51,21 +51,51 @@ export async function deleteAccountHandler(
     console.error('[delete-account] Rate limit check failed:', error);
   }
 
+  // The 409 subscription-block check must never take the whole request down:
+  // if the Firestore read itself fails (service-account IAM, transient
+  // outage, …), we log and continue best-effort instead of returning 500 —
+  // the user still has the right to have their account deleted.
+  let activeExpiry: string | null = null;
   try {
-    const activeExpiry = await getActiveSubscriptionExpiry(uid);
-    if (activeExpiry) {
-      // 409 Conflict: the account has a live paid term. The client should
-      // tell the user to cancel first / contact support for refunds.
-      res.status(409).json({
-        error:
-          'Your subscription is still active. Cancel it or contact support before deleting your account.',
-        code: 'active_subscription',
-        expiresAt: activeExpiry,
-      });
-      return;
-    }
+    activeExpiry = await getActiveSubscriptionExpiry(uid);
+  } catch (error) {
+    console.error(
+      `[delete-account] Subscription check failed for uid=${uid.slice(0, 8)}; proceeding best-effort:`,
+      error
+    );
+  }
 
+  if (activeExpiry) {
+    // 409 Conflict: the account has a live paid term. The client should
+    // tell the user to cancel first / contact support for refunds.
+    res.status(409).json({
+      error:
+        'Your subscription is still active. Cancel it or contact support before deleting your account.',
+      code: 'active_subscription',
+      expiresAt: activeExpiry,
+    });
+    return;
+  }
+
+  try {
     const summary = await deleteAccountData(uid);
+
+    // Loud signal when nothing could be cleaned up server-side — usually
+    // means the service account lacks Firestore IAM (Cloud Datastore User),
+    // NOT a security-rules problem: the Admin SDK bypasses the rules.
+    if (
+      !summary.subscriptionDeleted &&
+      !summary.userDocDeleted &&
+      summary.pendingPaymentsDeleted === 0 &&
+      summary.paymentsAnonymized === 0 &&
+      summary.chatsDeleted === 0
+    ) {
+      console.error(
+        `[delete-account] WARNING: no server-side data was removed for uid=${uid.slice(0, 8)}. ` +
+          'If the errors above are firestore/permission-denied, grant the service account ' +
+          'the Cloud Datastore User role in Google Cloud IAM.'
+      );
+    }
 
     // Invalidate future API access for this account: revoke refresh tokens
     // so every issued ID token stops verifying within its remaining
@@ -106,6 +136,7 @@ export async function deleteAccountHandler(
       },
       anonymizedPayments: summary.paymentsAnonymized,
       chatsDeleted: summary.chatsDeleted,
+      chatDocsFailed: summary.chatDocsFailed,
       firebaseAuthDeleted,
     });
   } catch (error) {
