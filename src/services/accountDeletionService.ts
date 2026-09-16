@@ -6,6 +6,12 @@ import {
   normalizeStatus,
 } from './subscriptionService';
 import { RATE_LIMITS_COLLECTION } from './rateLimitService';
+import {
+  CHAT_STORAGE_SHAPES,
+  USER_DATA_FIELD_HINTS,
+  getChatCollectionsOverride,
+  listUserDocSubcollections,
+} from './chatHistoryDiscovery';
 
 /**
  * Account deletion — server-side path.
@@ -40,6 +46,8 @@ export interface DeletionSummary {
   userDocDeleted: boolean;
   pendingPaymentsDeleted: number;
   paymentsAnonymized: number;
+  chatsDeleted: number;
+  chatDocsFailed: number;
 }
 
 /** Deletes or anonymizes all server-side data tied to the user. */
@@ -49,6 +57,8 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
     userDocDeleted: false,
     pendingPaymentsDeleted: 0,
     paymentsAnonymized: 0,
+    chatsDeleted: 0,
+    chatDocsFailed: 0,
   };
 
   // 1) Subscription state (server-only quota/plan doc).
@@ -106,7 +116,21 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
     console.error(`[delete-account] Payment cleanup failed for uid=${uid.slice(0, 8)}:`, error);
   }
 
-  // 4) Rate-limit counters (no personal content, but tied to the uid key).
+  // 4) Chat history written by the app into Firestore.
+  //    The app must NOT try to delete these client-side (security rules deny
+  //    everything the backend does not explicitly allow, and the catch-all
+  //    rule denies the rest) — this server-side purge is the single source of
+  //    truth for wiping chat data. Layout is auto-discovered; CHAT_COLLECTIONS
+  //    overrides the candidate list.
+  try {
+    const { docsDeleted, docsFailed } = await deleteChatHistory(uid);
+    summary.chatsDeleted = docsDeleted;
+    summary.chatDocsFailed = docsFailed;
+  } catch (error) {
+    console.error(`[delete-account] Chat history cleanup failed for uid=${uid.slice(0, 8)}:`, error);
+  }
+
+  // 5) Rate-limit counters (no personal content, but tied to the uid key).
   try {
     const limits = await db.collection(RATE_LIMITS_COLLECTION).get();
     // The rateLimits docs are keyed like "chat:<uid>"; delete only this
@@ -129,6 +153,92 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
   }
 
   return summary;
+}
+
+/**
+ * Deletes the user's chat history from Firestore. The app stores chats in a
+ * shape this repo does not define, so all well-known shapes are attempted
+ * (see chatHistoryDiscovery.ts). Best-effort: failures are logged and
+ * counted, never thrown.
+ */
+async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; docsFailed: number }> {
+  let docsDeleted = 0;
+  let docsFailed = 0;
+
+  const batchDeleteDocs = async (refs: FirebaseFirestore.DocumentReference[]) => {
+    const batch = db.batch();
+    let ops = 0;
+    for (const ref of refs) {
+      batch.delete(ref);
+      ops += 1;
+      if (ops >= 400) {
+        await batch.commit();
+        ops = 0;
+      }
+    }
+    if (ops > 0) await batch.commit();
+    docsDeleted += refs.length;
+  };
+
+  try {
+    const override = getChatCollectionsOverride();
+    const topLevelCandidates = override.length > 0 ? override : CHAT_STORAGE_SHAPES.UID_FIELD_COLLECTIONS;
+
+    // Shape A: top-level collection with an owner uid field on each doc.
+    for (const collection of topLevelCandidates) {
+      for (const field of USER_DATA_FIELD_HINTS) {
+        try {
+          const snap = await db.collection(collection).where(field, '==', uid).limit(1000).get();
+          if (snap.empty) continue;
+          const refs = snap.docs.map((d) => d.ref);
+          await batchDeleteDocs(refs);
+          console.log(`[delete-account] Chat purge: ${refs.length} doc(s) from ${collection} (uid field: ${field})`);
+        } catch (error) {
+          // Unknown collection / missing index — expected for shapes the app
+          // does not use; log and continue with the next candidate.
+          console.error(`[delete-account] Chat purge probe failed on ${collection}.${field}:`, error);
+          docsFailed += 1;
+        }
+      }
+    }
+
+    // Shape B: one document per user holding the whole conversation.
+    for (const collection of CHAT_STORAGE_SHAPES.PER_USER_DOC_COLLECTIONS) {
+      try {
+        const docRef = db.collection(collection).doc(uid);
+        const snap = await docRef.get();
+        if (snap.exists) {
+          await batchDeleteDocs([docRef]);
+          console.log(`[delete-account] Chat purge: per-user doc ${collection}/${uid}`);
+        }
+      } catch (error) {
+        console.error(`[delete-account] Chat purge per-user-doc failed on ${collection}:`, error);
+        docsFailed += 1;
+      }
+    }
+
+    // Shape C: subcollections under users/{uid} (e.g. users/{uid}/messages).
+    const subcollections = await listUserDocSubcollections(uid);
+    const knownChatSubs = CHAT_STORAGE_SHAPES.USER_DOC_SUBCOLLECTIONS as readonly string[];
+    for (const sub of subcollections) {
+      if (!knownChatSubs.includes(sub)) continue;
+      try {
+        const snap = await db.collection('users').doc(uid).collection(sub).limit(1000).get();
+        if (snap.empty) continue;
+        const refs = snap.docs.map((d) => d.ref);
+        await batchDeleteDocs(refs);
+        console.log(`[delete-account] Chat purge: ${refs.length} doc(s) from users/{uid}/${sub}`);
+      } catch (error) {
+        console.error(`[delete-account] Chat purge subcollection failed on users/{uid}/${sub}:`, error);
+        docsFailed += 1;
+      }
+    }
+  } catch (error) {
+    console.error(`[delete-account] Chat history purge error for uid=${uid.slice(0, 8)}:`, error);
+    docsFailed += 1;
+  }
+
+  return { docsDeleted, docsFailed };
 }
 
 /** Revokes all of the user's refresh tokens so existing ID tokens die within minutes. */

@@ -169,8 +169,9 @@ Server-to-server webhook. Verifies the HMAC-SHA256 signature over the raw body a
 Delete the authenticated user's account server-side. **Auth required** (uid comes from the verified Firebase token — one user can never delete another's data). Rate limited to 3 / hour.
 
 - **409** `{ code: 'active_subscription', expiresAt }` — deletion is blocked while a paid subscription is **active**. The user must cancel first via `POST /api/payment-cancel` (immediate downgrade), let it expire, or contact support per the refund policy; deletion must not silently bypass payment obligations. A cancelled subscription no longer blocks deletion.
-- **200** on success: deletes `subscriptions/{uid}`, the `users/{uid}` profile doc, rate-limit counters and pending payment orders; **anonymizes** paid payment rows (financial records are kept, uid redacted); revokes all Firebase refresh tokens (existing ID tokens stop verifying within minutes) and deletes the Firebase Auth account (no-op if the client already called `currentUser.delete()`).
-- The frontend may still do its client-side cleanup + `currentUser.delete()` first; this endpoint is the server-side guarantee that server data and API access are gone.
+- **200** on success: deletes `subscriptions/{uid}`, the `users/{uid}` profile doc, **chat history** (stored by the app in Firestore — layout is auto-discovered, see below), rate-limit counters and pending payment orders; **anonymizes** paid payment rows (financial records are kept, uid redacted); revokes all Firebase refresh tokens (existing ID tokens stop verifying within minutes) and deletes the Firebase Auth account (no-op if the client already called `currentUser.delete()`).
+- Chat-history purge: the backend deletes the user's chats from every well-known layout — a top-level collection with a uid field (`chats`, `chatHistory`, `messages`, `conversations` × `uid`/`userId`/`ownerId`/...), one doc per user (`chats/{uid}`, `chatHistory/{uid}`), and subcollections under `users/{uid}`. Set `CHAT_COLLECTIONS` to force specific collections. The response reports how many chat docs were removed (`chatsDeleted`).
+- **The app must NOT do its own Firestore cleanup** in the delete flow (no direct doc deletes from the client). Since the security rules were hardened, client writes to `subscriptions` and any unlisted collection are denied and the flow fails with `[firestore/permission-denied]`. The correct client flow is: call `POST /api/payment-cancel` if needed → call `DELETE /api/account` → call `currentUser.delete()` (optional). Everything server-side is wiped by the API.
 
 ### GET /api/diagnose
 
@@ -182,10 +183,11 @@ Diagnostics — **disabled by default.** Set `ENABLE_DIAGNOSE=true` to enable (d
 - On `429` with `limitReached: true`, show a "limit reached" screen counting down to `nextRefreshAt` (epoch ms).
 - Payment flow: `POST /api/payment-order` → open Razorpay Checkout with `orderId`, `amount`, `currency`, `keyId` → on success call `POST /api/payment-verify` with the three checkout fields. Safe to retry verify on network failures.
 - Refresh plan/quota from `GET /api/user/plan` after app resume or payment success.
+- Account deletion: do NOT delete Firestore docs from the client first (the rules deny it — `[firestore/permission-denied]`). Call `POST /api/payment-cancel` if there is an active subscription, then `DELETE /api/account`, then optionally `currentUser.delete()`. The backend wipes all server-side data, including chat history.
 
 ## Environment variables
 
-See [.env.example](./.env.example) for the annotated full list (Firebase Admin, OpenRouter/Groq keys with optional model overrides, Razorpay keys/webhook secret, `ALLOWED_ORIGINS`, `ENABLE_DIAGNOSE`). The example file contains no real secrets; never commit `.env`.
+See [.env.example](./.env.example) for the annotated full list (Firebase Admin, OpenRouter/Groq keys with optional model overrides, Razorpay keys/webhook secret, `ALLOWED_ORIGINS`, `CHAT_COLLECTIONS`, `ENABLE_DIAGNOSE`). The example file contains no real secrets; never commit `.env`.
 
 ## Security model
 

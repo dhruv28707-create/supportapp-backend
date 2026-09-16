@@ -18,6 +18,14 @@ const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
  * Deletes the authenticated user's server-side account data and revokes
  * their Firebase tokens (existing ID tokens stop working within minutes).
  *
+ * The full server-side wipe covers: the subscriptions/{uid} doc, the
+ * users/{uid} profile doc, chat history (shape auto-discovered, or forced
+ * via CHAT_COLLECTIONS), pending payment orders (paid rows anonymized),
+ * rate-limit counters, and the Firebase Auth account. The app must NOT do
+ * its own Firestore cleanup first — old versions did and now fail with
+ * [firestore/permission-denied] because the security rules no longer allow
+ * client writes to those collections.
+ *
  * - Ownership is implied by auth: uid comes from the VERIFIED Firebase ID
  *   token, never from the body/query. There is no way for one user to
  *   delete another user's data.
@@ -97,6 +105,7 @@ export async function deleteAccountHandler(
         pendingPayments: summary.pendingPaymentsDeleted,
       },
       anonymizedPayments: summary.paymentsAnonymized,
+      chatsDeleted: summary.chatsDeleted,
       firebaseAuthDeleted,
     });
   } catch (error) {
