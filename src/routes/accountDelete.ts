@@ -78,7 +78,16 @@ export async function deleteAccountHandler(
   }
 
   try {
-    const summary = await deleteAccountData(uid);
+    const requestStartedAt = Date.now();
+
+    // Token revocation is independent of the Firestore wipe — start both at
+    // once. (Auth for THIS request was already verified before the handler
+    // ran, so revoking mid-request cannot invalidate our own invocation.)
+    const dataCleanupPromise = deleteAccountData(uid);
+    const tokensRevoked = await revokeUserTokens(uid);
+    const summary = await dataCleanupPromise;
+
+    const totalDataMs = Date.now() - requestStartedAt;
 
     // Loud signal when nothing could be cleaned up server-side — usually
     // means the service account lacks Firestore IAM (Cloud Datastore User),
@@ -97,11 +106,8 @@ export async function deleteAccountHandler(
       );
     }
 
-    // Invalidate future API access for this account: revoke refresh tokens
-    // so every issued ID token stops verifying within its remaining
-    // lifetime (<= ~1h). Done BEFORE the Firebase Auth account deletion so
-    // the account is fully unusable even if the next step fails.
-    const tokensRevoked = await revokeUserTokens(uid);
+    // (Refresh-token revocation already ran concurrently above, so every
+    // issued ID token is dying even if the remaining steps were to fail.)
 
     // Best-effort removal of the Firebase Auth account itself. The frontend
     // may have already called currentUser.delete() — that's fine; this is
@@ -121,11 +127,15 @@ export async function deleteAccountHandler(
       }
     }
 
-    console.log(`[delete-account] Completed for uid=${uid.slice(0, 8)}`, {
-      ...summary,
-      tokensRevoked,
-      firebaseAuthDeleted,
-    });
+    console.log(
+      `[delete-account] Completed for uid=${uid.slice(0, 8)} in ${Date.now() - requestStartedAt}ms` +
+        ` (data wipe ${summary.durationMs}ms)`,
+      {
+        ...summary,
+        tokensRevoked,
+        firebaseAuthDeleted,
+      }
+    );
 
     res.json({
       success: true,
@@ -138,6 +148,7 @@ export async function deleteAccountHandler(
       chatsDeleted: summary.chatsDeleted,
       chatDocsFailed: summary.chatDocsFailed,
       firebaseAuthDeleted,
+      durationMs: totalDataMs,
     });
   } catch (error) {
     if (error instanceof DeletionBlockedError) {
