@@ -49,14 +49,14 @@ export async function consumeRateLimit(
   max: number,
   windowMs: number
 ): Promise<RateLimitResult> {
-  const ref = db.collection(RATE_LIMITS_COLLECTION).doc(key);
-
   try {
+    const ref = db.collection(RATE_LIMITS_COLLECTION).doc(key);
     const snap = await ref.get();
     const now = Date.now();
 
     let count = 0;
     let windowStart = now;
+    let windowExpired = true;
     if (snap.exists) {
       const data = snap.data() || {};
       const storedCount = typeof data.count === 'number' ? data.count : 0;
@@ -66,25 +66,36 @@ export async function consumeRateLimit(
         // Window still open: continue it.
         count = storedCount;
         windowStart = storedStart;
+        windowExpired = false;
       }
-      // else: expired window — start a fresh one (windowStart = now).
+      // else: expired window — start a fresh one (windowStart = now, count = 0).
     }
 
     if (count >= max) {
       throw new RateLimitExceededError(windowStart + windowMs - now);
     }
 
-    // Non-transactional atomic increment. A concurrent request may bump the
-    // same doc in parallel (bounded overshoot, see doc comment above); the
-    // count still converges to the true number of admitted requests.
-    const write = ref.set(
-      {
-        count: FieldValue.increment(1),
-        windowStart,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
+    // Window reset must write count 1 (not increment the stale count), or a
+    // reset window would keep growing from the old value (e.g. 3 -> 4).
+    // Non-transactional by design (see doc comment above).
+    const write =
+      windowExpired || !snap.exists
+        ? ref.set(
+            {
+              count: 1,
+              windowStart,
+              updatedAt: now,
+            },
+            { merge: true }
+          )
+        : ref.set(
+            {
+              count: FieldValue.increment(1),
+              windowStart,
+              updatedAt: now,
+            },
+            { merge: true }
+          );
     // Surface async write failures in logs without blocking the caller —
     // the limiter is fail-open by design.
     void write.catch((error: unknown) => {

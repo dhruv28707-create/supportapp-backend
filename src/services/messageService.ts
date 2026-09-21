@@ -88,7 +88,9 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
     state.expiresAt !== null &&
     now >= state.expiresAt
   ) {
-    return { ...state, plan: DEFAULT_PLAN, expiresAt: null };
+    // Downgrade resets quota so the user starts fresh on free (otherwise a
+    // heavy paid user would land on free with 0 remaining messages).
+    return { ...state, plan: DEFAULT_PLAN, expiresAt: null, messageCount: 0 };
   }
   return state;
 }
@@ -161,31 +163,55 @@ export async function getPlanState(uid: string): Promise<UserMessageState> {
 export async function consumeMessage(uid: string): Promise<{ success: true }> {
   const now = Date.now();
 
-  const { plan, messageCount, lastResetAt } = await getPlanState(uid);
-  const config = PLAN_CONFIG[plan];
+  // Load fresh state (bypass the TTL cache): the cache may hold a stale plan
+  // right after a grant/cancel, and getPlanState's window-refresh would mask
+  // whether the stored window actually rolled over.
+  const raw = await loadSubscriptionState(uid);
+  const state = applyExpiry(raw, now);
+  const downgraded = state.plan !== raw.plan || state.expiresAt !== raw.expiresAt;
+  const config = PLAN_CONFIG[state.plan];
 
-  if (messageCount >= config.limit) {
-    throw new LimitReachedError(lastResetAt + config.refreshMs, plan);
+  let effectiveCount = state.messageCount;
+  let effectiveReset = state.lastResetAt;
+  const windowExpired = now - effectiveReset >= config.refreshMs;
+  if (windowExpired) {
+    effectiveCount = 0;
+    effectiveReset = now;
   }
 
-  const windowExpired = now - lastResetAt >= config.refreshMs;
+  if (effectiveCount >= config.limit) {
+    throw new LimitReachedError(effectiveReset + config.refreshMs, state.plan);
+  }
+
+  const needsResetWrite = windowExpired || downgraded;
 
   try {
-    const fields: Record<string, unknown> = {
-      plan,
-      messageCount: FieldValue.increment(1),
-      updatedAt: now,
-    };
-    if (windowExpired) {
-      fields.lastResetAt = now;
-    }
-    if (plan === DEFAULT_PLAN) {
-      // Free plan (including a just-applied expiry downgrade): clear any
-      // stale expiry so downstream reads see a consistent doc.
-      fields.expiresAt = null;
-    }
+    if (needsResetWrite) {
+      // Persist the reset (and any expiry downgrade) with an explicit count
+      // of 1: FieldValue.increment(1) would keep growing from the stale
+      // stored value (e.g. 20 -> 21) instead of resetting to 1.
+      const fields: Record<string, unknown> = {
+        plan: state.plan,
+        expiresAt: state.expiresAt,
+        messageCount: 1,
+        lastResetAt: effectiveReset,
+        updatedAt: now,
+      };
+      await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
+    } else {
+      const fields: Record<string, unknown> = {
+        plan: state.plan,
+        messageCount: FieldValue.increment(1),
+        updatedAt: now,
+      };
+      if (state.plan === DEFAULT_PLAN) {
+        // Free plan (including a just-applied expiry downgrade): clear any
+        // stale expiry so downstream reads see a consistent doc.
+        fields.expiresAt = null;
+      }
 
-    await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
+      await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
+    }
   } finally {
     invalidatePlanCache(uid);
   }
@@ -204,6 +230,7 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
   const raw = await loadSubscriptionState(uid);
   const state = applyExpiry(raw, now);
   const config = PLAN_CONFIG[state.plan];
+  const downgraded = state.plan !== raw.plan || state.expiresAt !== raw.expiresAt;
 
   let { messageCount, lastResetAt } = state;
 
@@ -228,13 +255,23 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
     } catch (error) {
       console.error(`[quota] Window reset write failed uid=${uid.slice(0, 8)}:`, error);
     }
-  } else if (state.plan !== raw.plan || state.expiresAt !== raw.expiresAt) {
-    // Expiry downgraded the plan relative to the stored doc — persist it.
+  } else if (downgraded) {
+    // Expiry downgraded the plan relative to the stored doc — persist it and
+    // reset the quota so free starts at 0 (not the paid count).
+    messageCount = 0;
     try {
       await db
         .collection(SUBSCRIPTIONS_COLLECTION)
         .doc(uid)
-        .set({ plan: state.plan, expiresAt: state.expiresAt, updatedAt: now }, { merge: true });
+        .set(
+          {
+            plan: state.plan,
+            expiresAt: state.expiresAt,
+            messageCount: 0,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
       invalidatePlanCache(uid);
     } catch (error) {
       console.error(`[quota] Expiry downgrade write failed uid=${uid.slice(0, 8)}:`, error);

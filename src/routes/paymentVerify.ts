@@ -12,7 +12,6 @@ import {
 import { tierToPlan } from '../constants';
 import { timingSafeEqualHex } from '../utils/crypto';
 
-const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const VERIFY_RATE_LIMIT_MAX = 20;
 const VERIFY_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
@@ -42,7 +41,7 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
     return;
   }
 
-  if (!KEY_SECRET) {
+  if (!process.env.RAZORPAY_KEY_SECRET) {
     console.error('Missing RAZORPAY_KEY_SECRET environment variable');
     res.status(500).json({ error: 'Server misconfigured' });
     return;
@@ -65,8 +64,10 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
   }
 
   // Payment signature: HMAC-SHA256(key_secret, `${order_id}|${payment_id}`).
+  // Read lazily so tests can stub the env var after import.
+  const keySecret = process.env.RAZORPAY_KEY_SECRET as string;
   const expectedHex = crypto
-    .createHmac('sha256', KEY_SECRET)
+    .createHmac('sha256', keySecret)
     .update(`${razorpay_order_id}|${razorpay_payment_id}`)
     .digest('hex');
 

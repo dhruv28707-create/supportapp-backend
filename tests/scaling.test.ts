@@ -37,9 +37,12 @@ describe('rateLimitService (Fix #1: no transaction contention)', () => {
     const spy = vi.spyOn(mockDb, 'collection').mockImplementation(() => {
       throw new Error('store down');
     });
-    const result = await consumeRateLimit('chat:u1', 3, 60000);
-    expect(result).toEqual({ count: 0, windowStart: 0 });
-    spy.mockRestore();
+    try {
+      const result = await consumeRateLimit('chat:u1', 3, 60000);
+      expect(result).toEqual({ count: 0, windowStart: 0 });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

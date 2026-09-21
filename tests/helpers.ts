@@ -19,6 +19,16 @@ export const mockAppCheck = {
   verifyToken: vi.fn(),
 };
 
+const razorpayMocks = vi.hoisted(() => ({
+  ordersCreate: vi.fn(),
+  paymentsFetch: vi.fn(),
+  subscriptionsCancel: vi.fn(),
+}));
+
+export const mockRazorpayOrdersCreate = razorpayMocks.ordersCreate;
+export const mockRazorpayPaymentsFetch = razorpayMocks.paymentsFetch;
+export const mockRazorpaySubscriptionsCancel = razorpayMocks.subscriptionsCancel;
+
 vi.mock('firebase-admin/firestore', () => ({
   FieldValue,
   Timestamp: { now: () => ({ toDate: () => new Date() }) },
@@ -52,9 +62,9 @@ vi.mock('firebase-admin', () => {
 
 vi.mock('razorpay', () => ({
   default: class MockRazorpay {
-    orders = { create: vi.fn() };
-    payments = { fetch: vi.fn() };
-    subscriptions = { cancel: vi.fn() };
+    orders = { create: razorpayMocks.ordersCreate };
+    payments = { fetch: razorpayMocks.paymentsFetch };
+    subscriptions = { cancel: razorpayMocks.subscriptionsCancel };
   },
 }));
 
@@ -94,5 +104,12 @@ export function resetAll(): void {
   mockAuth.revokeRefreshTokens.mockReset();
   mockAuth.deleteUser.mockReset();
   mockAppCheck.verifyToken.mockReset();
+  mockRazorpayOrdersCreate.mockReset();
+  mockRazorpayPaymentsFetch.mockReset();
+  mockRazorpaySubscriptionsCancel.mockReset();
   vi.unstubAllEnvs();
+  vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
+  vi.stubEnv('GROQ_API_KEY', 'test-groq-key');
+  vi.stubEnv('RAZORPAY_KEY_ID', 'test_key_id');
+  vi.stubEnv('RAZORPAY_KEY_SECRET', 'test_secret');
 }

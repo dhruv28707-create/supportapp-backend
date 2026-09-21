@@ -28,9 +28,6 @@ import {
 const CHAT_RATE_LIMIT_MAX = 30;
 const CHAT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-
 interface ModelTarget {
   name: string;
   baseUrl: string;
@@ -41,31 +38,31 @@ interface ModelTarget {
   extraBody?: Record<string, unknown>;
 }
 
-// Primary model — Qwen3-14B (Apache 2.0) served via OpenRouter (Groq does
-// not host Qwen models). NOTE: the old slug qwen/qwen-2.5-14b-instruct was
-// removed from OpenRouter's catalog; qwen3-14b is its successor. Qwen3 runs
-// in non-thinking mode by default; reasoning.enabled=false is sent anyway so
-// no <think> chain-of-thought can ever leak into the reply.
-const PRIMARY: ModelTarget = {
-  name: 'primary',
-  baseUrl: process.env.PRIMARY_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions',
-  apiKey: process.env.PRIMARY_API_KEY || OPENROUTER_API_KEY || '',
-  model: process.env.PRIMARY_MODEL || 'qwen/qwen3-14b',
-  extraBody: { reasoning: { enabled: false } },
-};
-// Fallback model — GPT-OSS 20B on Groq: fast and cheap. NOTE: Groq shut down
-// llama-3.1-8b-instant (and all Llama chat models) on 2026-08-16, so the
-// Llama family is gone from Groq. gpt-oss-20b is Groq's recommended
-// replacement. It rejects reasoning_effort:'none' (only low/medium/high are
-// allowed), so use 'low' — its reasoning comes back in a separate field and
-// never leaks into the visible reply content.
-const FALLBACK: ModelTarget = {
-  name: 'fallback',
-  baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
-  apiKey: GROQ_API_KEY || '',
-  model: process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b',
-  extraBody: { reasoning_effort: 'low' },
-};
+/**
+ * Reads provider keys/targets lazily (per request) so tests can stub env vars
+ * with vi.stubEnv AFTER the module was imported. Module-level
+ * `process.env.X` captures would freeze the import-time value (usually
+ * undefined in tests) and break every chat test with ai_key_missing.
+ */
+function getModelTargets(): { PRIMARY: ModelTarget; FALLBACK: ModelTarget } {
+  const groqKey = process.env.GROQ_API_KEY || '';
+  const openRouterKey = process.env.OPENROUTER_API_KEY || '';
+  const PRIMARY: ModelTarget = {
+    name: 'primary',
+    baseUrl: process.env.PRIMARY_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions',
+    apiKey: process.env.PRIMARY_API_KEY || openRouterKey,
+    model: process.env.PRIMARY_MODEL || 'qwen/qwen3-14b',
+    extraBody: { reasoning: { enabled: false } },
+  };
+  const FALLBACK: ModelTarget = {
+    name: 'fallback',
+    baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
+    apiKey: groqKey,
+    model: process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b',
+    extraBody: { reasoning_effort: 'low' },
+  };
+  return { PRIMARY, FALLBACK };
+}
 // Both models are plain instruct models (no hidden reasoning tokens), so the
 // budget goes straight to the visible reply. The system prompt asks for
 // short, human-scale replies (mostly 1-3 sentences); 600 is a generous ceiling
@@ -339,15 +336,10 @@ async function handleChatSend(
     religionSubType = religionSubType.toLowerCase();
   }
 
-  // --- Env guard (fail with a clear error instead of a crash) ---
-  if (!PRIMARY.apiKey && !FALLBACK.apiKey) {
-    console.error(`[chat uid=${uid}] Missing OPENROUTER_API_KEY and GROQ_API_KEY env vars`);
-    sendJson(res, 503, { error: 'AI service unavailable', code: 'ai_key_missing' });
-    return;
-  }
-
   // --- Server-side persona gating (the frontend UI lock is cosmetic) ---
   // A 403 here must NOT consume quota and must NOT call any AI provider.
+  // Runs BEFORE the env guard so a locked persona reports persona_locked
+  // (403) even when provider keys are missing.
   let plan: PlanType;
   try {
     plan = (await getPlanState(uid)).plan;
@@ -363,6 +355,14 @@ async function handleChatSend(
       plan,
       personality,
     });
+    return;
+  }
+
+  // --- Env guard (fail with a clear error instead of a crash) ---
+  const { PRIMARY, FALLBACK } = getModelTargets();
+  if (!PRIMARY.apiKey && !FALLBACK.apiKey) {
+    console.error(`[chat uid=${uid}] Missing OPENROUTER_API_KEY and GROQ_API_KEY env vars`);
+    sendJson(res, 503, { error: 'AI service unavailable', code: 'ai_key_missing' });
     return;
   }
 

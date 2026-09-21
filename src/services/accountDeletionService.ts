@@ -132,13 +132,11 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
 
   // 3) Payment records owned by the user.
   const cleanupPayments = (async () => {
-    const batch = db.batch();
-    let ops = 0;
-    // Paginate: a heavy user can have more payments than one query's window
-    // (see PAGE_SIZE below); the old single .get() silently skipped the
-    // rest. Re-query until the user has no payments left. The paid rows are
-    // anonymized (uid redacted) rather than deleted, so they stop matching
-    // the query naturally and pagination terminates.
+    // Paginate: a heavy user can have more payments than one query's window.
+    // Commit a FRESH batch per page: Firestore batches are single-use (a
+    // committed batch cannot be reused), and the trailing ops must be
+    // committed too — otherwise deletes/anonymizations never persist, the
+    // same page matches forever, and production loops until timeout.
     for (;;) {
       const payments = await db
         .collection(PAYMENTS_COLLECTION)
@@ -147,6 +145,7 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
         .get();
       if (payments.empty) break;
 
+      const batch = db.batch();
       for (const doc of payments.docs) {
         const data = doc.data() || {};
         if (data.status === 'paid') {
@@ -165,13 +164,9 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
           batch.delete(doc.ref);
           summary.pendingPaymentsDeleted += 1;
         }
-        ops += 1;
-        if (ops >= 400) {
-          // Firestore batches cap at 500 ops; stay safely under it.
-          await batch.commit();
-          ops = 0;
-        }
       }
+      await batch.commit();
+      if (payments.size < PAYMENTS_PAGE_SIZE) break;
     }
   })().catch((error) => {
     console.error(`[delete-account] Payment cleanup failed for uid=${uid.slice(0, 8)}:`, error);

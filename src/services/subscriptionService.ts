@@ -52,19 +52,16 @@ export function computeExpiresAtMs(
 }
 
 /**
- * Grants a paid plan and marks the payment as paid, atomically and
- * idempotently.
+ * Grants a paid plan and marks the payment as paid, idempotently.
  *
  * ONLY call after the payment has been authoritatively verified
  * (signature + Razorpay payment fetch + amount match).
  *
- * Idempotency: the payments/{orderId} status flip happens INSIDE the same
- * transaction that reads it, so a webhook and a client verify racing on the
- * same order grant exactly once — the second caller sees status 'paid' and
- * gets the original paidAt/expiry instead of resetting messageCount or
- * extending the expiry. The payment doc's uid/tier/amount snapshot is also
- * copied onto the grant to defend against the order doc changing between
- * verification and grant.
+ * Transaction-free by design: hot paths must never use runTransaction
+ * (Firestore serializes transactions on the same doc, causing contention
+ * and 500s under burst load). Idempotency is preserved via a read-then-write
+ * on payments/{orderId}: the second caller sees status 'paid' and returns
+ * the original plan without resetting messageCount or extending expiry.
  */
 export async function grantPlanAndMarkPaid(
   uid: string,
@@ -77,67 +74,74 @@ export async function grantPlanAndMarkPaid(
 
   const now = Date.now();
 
-  const grantedPlan = await db.runTransaction(async (transaction) => {
-    const payRef = db.collection(PAYMENTS_COLLECTION).doc(orderId);
-    const paySnap = await transaction.get(payRef);
-    const record: DocumentData = paySnap.exists ? paySnap.data() || {} : {};
+  const payRef = db.collection(PAYMENTS_COLLECTION).doc(orderId);
+  const paySnap = await payRef.get();
+  const record: DocumentData = paySnap.exists ? paySnap.data() || {} : {};
 
-    // Idempotency — a concurrent path already granted this order. Report the
-    // effective plan without re-granting (no messageCount reset, no new
-    // expiry based on now).
-    if (record.status === 'paid') {
-      return tierToPlan(String(record.tier ?? tier)) ?? plan;
-    }
+  // Idempotency — a concurrent path already granted this order. Report the
+  // effective plan without re-granting (no messageCount reset, no new
+  // expiry based on now).
+  if (record.status === 'paid') {
+    return tierToPlan(String(record.tier ?? tier)) ?? plan;
+  }
 
-    // Defensive re-check inside the transaction: the doc must still describe
-    // the same order we verified.
-    if (
-      record.uid !== undefined &&
-      record.uid !== uid &&
-      record.status !== 'paid'
-    ) {
-      throw new Error(`Order ${orderId} belongs to a different uid; refusing to grant`);
-    }
+  // Defensive re-check (no transaction): the doc must still describe
+  // the same order we verified.
+  if (
+    record.uid !== undefined &&
+    record.uid !== uid &&
+    record.status !== 'paid'
+  ) {
+    throw new Error(`Order ${orderId} belongs to a different uid; refusing to grant`);
+  }
 
-    // Use the record's own amount when present so the grant matches what the
-    // order was created with (never a client-supplied value).
-    const recordTier = typeof record.tier === 'string' ? record.tier : tier;
-    const effectivePlan = tierToPlan(recordTier) ?? plan;
-    const expiresAt = computeExpiresAtMs(recordTier);
+  // Use the record's own amount when present so the grant matches what the
+  // order was created with (never a client-supplied value).
+  const recordTier = typeof record.tier === 'string' ? record.tier : tier;
+  const effectivePlan = tierToPlan(recordTier) ?? plan;
+  const expiresAt = computeExpiresAtMs(recordTier);
 
-    const paidFields: PaidPaymentFields = {
-      status: 'paid',
-      razorpay_payment_id: paymentId ?? null,
+  const paidFields: PaidPaymentFields = {
+    status: 'paid',
+    razorpay_payment_id: paymentId ?? null,
+    plan: effectivePlan,
+    paidAt: new Date(now),
+    uid,
+    tier: recordTier,
+    amount: typeof record.amount === 'number' ? record.amount : null,
+    grantedAt: now,
+  };
+
+  await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(
+    {
       plan: effectivePlan,
-      paidAt: new Date(now),
-      uid,
-      tier: recordTier,
-      amount: typeof record.amount === 'number' ? record.amount : null,
-      grantedAt: now,
+      // Re-grant after a cancel must clear the cancelled marker, or the new
+      // paid plan would still read as cancelled downstream.
+      status: 'active',
+      expiresAt,
+      messageCount: 0,
+      lastResetAt: now,
+      updatedAt: now,
+      lastOrderId: orderId,
+    },
+    { merge: true }
+  );
+
+  await payRef.set(paidFields, { merge: true });
+
+  // Keep the plan TTL cache coherent (lazy require avoids a
+  // messageService <-> subscriptionService import cycle).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { invalidatePlanCache } = require('./messageService') as {
+      invalidatePlanCache: (uid: string) => void;
     };
+    invalidatePlanCache(uid);
+  } catch {
+    // Cache invalidation is best-effort; the TTL expires on its own.
+  }
 
-    transaction.set(
-      db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid),
-      {
-        plan: effectivePlan,
-        // Re-grant after a cancel must clear the cancelled marker, or the new
-        // paid plan would still read as cancelled downstream.
-        status: 'active',
-        expiresAt,
-        messageCount: 0,
-        lastResetAt: now,
-        updatedAt: now,
-        lastOrderId: orderId,
-      },
-      { merge: true }
-    );
-
-    transaction.set(payRef, paidFields, { merge: true });
-
-    return effectivePlan;
-  });
-
-  return grantedPlan;
+  return effectivePlan;
 }
 
 /**
@@ -156,34 +160,41 @@ export async function grantPlanAndMarkPaid(
 export async function cancelUserSubscription(uid: string): Promise<boolean> {
   const now = Date.now();
 
-  return await db.runTransaction(async (transaction) => {
-    const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
-    const snap = await transaction.get(subRef);
+  const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
+  const snap = await subRef.get();
 
-    if (!snap.exists) return false;
+  if (!snap.exists) return false;
 
-    const data = snap.data() || {};
-    // Only a doc that actually carries a paid plan is cancellable; a free
-    // plan (or an expired one already downgraded to free) has nothing active.
-    if (normalizeStatus(data.status) !== 'active' || data.plan === DEFAULT_PLAN) {
-      return false;
-    }
+  const data = snap.data() || {};
+  // Only a doc that actually carries a paid plan is cancellable; a free
+  // plan (or an expired one already downgraded to free) has nothing active.
+  if (normalizeStatus(data.status) !== 'active' || data.plan === DEFAULT_PLAN) {
+    return false;
+  }
 
-    transaction.set(
-      subRef,
-      {
-        plan: DEFAULT_PLAN,
-        status: 'cancelled',
-        expiresAt: null,
-        messageCount: typeof data.messageCount === 'number' ? data.messageCount : 0,
-        lastResetAt: typeof data.lastResetAt === 'number' ? data.lastResetAt : now,
-        lastOrderId: typeof data.lastOrderId === 'string' ? data.lastOrderId : null,
-        cancelledAt: new Date(now),
-        updatedAt: now,
-      },
-      { merge: true }
-    );
+  await subRef.set(
+    {
+      plan: DEFAULT_PLAN,
+      status: 'cancelled',
+      expiresAt: null,
+      messageCount: typeof data.messageCount === 'number' ? data.messageCount : 0,
+      lastResetAt: typeof data.lastResetAt === 'number' ? data.lastResetAt : now,
+      lastOrderId: typeof data.lastOrderId === 'string' ? data.lastOrderId : null,
+      cancelledAt: new Date(now),
+      updatedAt: now,
+    },
+    { merge: true }
+  );
 
-    return true;
-  });
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { invalidatePlanCache } = require('./messageService') as {
+      invalidatePlanCache: (uid: string) => void;
+    };
+    invalidatePlanCache(uid);
+  } catch {
+    // best-effort only
+  }
+
+  return true;
 }

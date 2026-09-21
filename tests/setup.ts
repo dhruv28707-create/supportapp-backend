@@ -14,6 +14,21 @@ import {
   FieldValue,
 } from './mocks/mockFirestore';
 
+// Shared Razorpay stubs: every `new Razorpay()` (the src singleton AND any
+// instance tests construct to stub) shares the SAME vi.fn() objects, so
+// `new Ctor().orders.create.mockResolvedValue(...)` in a test is visible to
+// the `razorpay` singleton the routes actually call. Per-instance fns would
+// make every stub invisible (the payment-order 500 regression).
+const razorpayMocks = vi.hoisted(() => ({
+  ordersCreate: vi.fn(),
+  paymentsFetch: vi.fn(),
+  subscriptionsCancel: vi.fn(),
+}));
+
+export const mockRazorpayOrdersCreate = razorpayMocks.ordersCreate;
+export const mockRazorpayPaymentsFetch = razorpayMocks.paymentsFetch;
+export const mockRazorpaySubscriptionsCancel = razorpayMocks.subscriptionsCancel;
+
 export const mockDb = new MockFirestore();
 
 export const mockAuth = {
@@ -55,13 +70,11 @@ vi.mock('firebase-admin', () => {
 });
 
 vi.mock('razorpay', () => {
-  const { default: RazorpayStub } = { default: class { constructor() {} } };
-  void RazorpayStub;
   return {
     default: class MockRazorpay {
-      orders = { create: vi.fn() };
-      payments = { fetch: vi.fn() };
-      subscriptions = { cancel: vi.fn() };
+      orders = { create: razorpayMocks.ordersCreate };
+      payments = { fetch: razorpayMocks.paymentsFetch };
+      subscriptions = { cancel: razorpayMocks.subscriptionsCancel };
     },
   };
 });
@@ -102,5 +115,14 @@ export function resetAll(): void {
   mockAuth.revokeRefreshTokens.mockReset();
   mockAuth.deleteUser.mockReset();
   mockAppCheck.verifyToken.mockReset();
+  mockRazorpayOrdersCreate.mockReset();
+  mockRazorpayPaymentsFetch.mockReset();
+  mockRazorpaySubscriptionsCancel.mockReset();
   vi.unstubAllEnvs();
+  // Default env stubs so lazily-read keys (chat AI keys, Razorpay id) are
+  // present unless a test overrides them. Must come AFTER unstubAllEnvs.
+  vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
+  vi.stubEnv('GROQ_API_KEY', 'test-groq-key');
+  vi.stubEnv('RAZORPAY_KEY_ID', 'test_key_id');
+  vi.stubEnv('RAZORPAY_KEY_SECRET', 'test_secret');
 }

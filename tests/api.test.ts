@@ -5,6 +5,7 @@ import {
   authHeader,
   resetAll,
   mockDb,
+  mockAuth,
   mockFetch,
   jsonResponse,
 } from './setup';

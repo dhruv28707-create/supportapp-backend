@@ -44,14 +44,14 @@ function hashIp(ip: string): string {
  * when the address is over budget. Never throws for storage failures.
  */
 export async function enforceChatIpThrottle(ip: string): Promise<void> {
-  const ref = db.collection(IP_LIMITS_COLLECTION).doc(`chat:${hashIp(ip)}`);
-
   try {
+    const ref = db.collection(IP_LIMITS_COLLECTION).doc(`chat:${hashIp(ip)}`);
     const snap = await ref.get();
     const now = Date.now();
 
     let count = 0;
     let windowStart = now;
+    let windowExpired = true;
     if (snap.exists) {
       const data = snap.data() || {};
       const storedCount = typeof data.count === 'number' ? data.count : 0;
@@ -59,6 +59,7 @@ export async function enforceChatIpThrottle(ip: string): Promise<void> {
       if (now - storedStart < CHAT_IP_RATE_LIMIT_WINDOW_MS) {
         count = storedCount;
         windowStart = storedStart;
+        windowExpired = false;
       }
     }
 
@@ -66,14 +67,24 @@ export async function enforceChatIpThrottle(ip: string): Promise<void> {
       throw new RateLimitExceededError(CHAT_IP_RATE_LIMIT_WINDOW_MS - (now - windowStart));
     }
 
-    const write = ref.set(
-      {
-        count: FieldValue.increment(1),
-        windowStart,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
+    const write =
+      windowExpired || !snap.exists
+        ? ref.set(
+            {
+              count: 1,
+              windowStart,
+              updatedAt: now,
+            },
+            { merge: true }
+          )
+        : ref.set(
+            {
+              count: FieldValue.increment(1),
+              windowStart,
+              updatedAt: now,
+            },
+            { merge: true }
+          );
     void write.catch((error: unknown) => {
       console.error('IP throttle write failed (already admitted request):', error);
     });
