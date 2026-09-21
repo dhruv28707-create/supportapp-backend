@@ -431,12 +431,11 @@ async function handleChatSend(
   ];
 
   // --- Race primary and fallback STAGGERED IN PARALLEL ---
-  // The old code tried providers strictly sequentially: with a dead/hung
-  // primary, every request waited the full AI_TIMEOUT_MS before the fallback
-  // even started (worst case 2x timeout). Here the fallback starts after a
-  // short head start for the primary — a slow primary can still win, but a
-  // DOWNED primary no longer doubles everyone's latency. Per-model circuit
-  // breakers skip a provider that is clearly down.
+  // First success wins: the fallback starts 300ms after the primary, so a
+  // slow-but-healthy primary can still win, but a HUNG primary never blocks
+  // a fast fallback (the old sequential `for await` waited out the full
+  // AI_TIMEOUT_MS on primary even when fallback had already succeeded —
+  // mobile clients abort ~10s and saw "AI not responding").
   const targetsToTry = PRIMARY.model === FALLBACK.model ? [PRIMARY] : [PRIMARY, FALLBACK];
   const STAGGER_MS = 300;
 
@@ -450,28 +449,45 @@ async function handleChatSend(
 
   let reply = '';
   let usedTarget: ModelTarget | null = null;
-  for (const attemptPromise of attempts) {
-    if (clientGoneSignal.aborted) break;
-    const result = await attemptPromise;
-    if (!result) continue;
-    const { attempt, target } = result;
-    if (attempt.ok && attempt.reply) {
-      reply = attempt.reply;
-      usedTarget = target;
-      break;
+  if (attempts.length > 0 && !clientGoneSignal.aborted) {
+    type AttemptResult = { attempt: GroqAttempt; target: ModelTarget } | null;
+    const deadlineMs = AI_TIMEOUT_MS + STAGGER_MS * attempts.length + 2000;
+    const firstSuccess = new Promise<AttemptResult>((resolve) => {
+      let settledFailures = 0;
+      attempts.forEach((p) => {
+        p.then((result) => {
+          if (result && result.attempt.ok && result.attempt.reply) {
+            resolve(result);
+          } else {
+            settledFailures += 1;
+            if (settledFailures === attempts.length) resolve(null);
+          }
+        });
+      });
+    });
+    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), deadlineMs));
+    const winner = await Promise.race([firstSuccess, timeout]);
+    if (winner && winner.attempt.reply) {
+      reply = winner.attempt.reply;
+      usedTarget = winner.target;
     }
-    if (attempt.ok) {
-      // HTTP 200 but no content — e.g. the token budget was hit before any
-      // text was produced, or the model filtered the response.
-      console.error(
-        `[chat uid=${uid}] Upstream returned HTTP 200 with empty content (${target.name} model=${target.model})`
-      );
-    } else {
-      console.error(
-        `[chat uid=${uid}] Upstream call failed (${target.name} model=${target.model} status=${attempt.status ?? 'network/timeout'})`,
-        attempt.errorData
-      );
-    }
+    // Observability: log every non-winning failure without blocking the reply.
+    void Promise.all(attempts).then((results) => {
+      for (const result of results) {
+        if (!result || result === winner) continue;
+        const { attempt, target } = result;
+        if (attempt.ok && !attempt.reply) {
+          console.error(
+            `[chat uid=${uid}] Upstream returned HTTP 200 with empty content (${target.name} model=${target.model})`
+          );
+        } else if (!attempt.ok) {
+          console.error(
+            `[chat uid=${uid}] Upstream call failed (${target.name} model=${target.model} status=${attempt.status ?? 'network/timeout'})`,
+            attempt.errorData
+          );
+        }
+      }
+    });
   }
 
   // The client (or its proxy) gave up — do not consume quota, do not attempt
