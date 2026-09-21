@@ -40,8 +40,17 @@ import {
  * per-probe timeout instead of strictly one-by-one.
  */
 
-/** Hard per-probe time budget for chat-layout discovery. */
-const PROBE_TIMEOUT_MS = 4000;
+/**
+ * Hard per-probe time budget for chat-layout discovery. Covers the FULL
+ * paginated delete of that shape now, not just one page — a heavy user with
+ * thousands of docs legitimately needs longer than before, so this is well
+ * above the old 4s. Still far under the 60s function limit; typical users
+ * (<400 docs per shape) finish in one round trip.
+ */
+const PROBE_TIMEOUT_MS = 30000;
+
+/** Docs fetched per query page during payment cleanup (see loop below). */
+const PAYMENTS_PAGE_SIZE = 400;
 
 /** Rejects if the underlying promise has not settled within `ms`. */
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -123,36 +132,47 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
 
   // 3) Payment records owned by the user.
   const cleanupPayments = (async () => {
-    const payments = await db.collection(PAYMENTS_COLLECTION).where('uid', '==', uid).get();
-
     const batch = db.batch();
     let ops = 0;
-    for (const doc of payments.docs) {
-      const data = doc.data() || {};
-      if (data.status === 'paid') {
-        // Financial record: anonymize instead of delete.
-        batch.set(
-          doc.ref,
-          {
-            uid: `deleted:${uid.slice(0, 8)}`,
-            deletedAt: new Date(),
-          },
-          { merge: true }
-        );
-        summary.paymentsAnonymized += 1;
-      } else {
-        // Pending/failed orders: delete outright.
-        batch.delete(doc.ref);
-        summary.pendingPaymentsDeleted += 1;
-      }
-      ops += 1;
-      if (ops >= 400) {
-        // Firestore batches cap at 500 ops; stay safely under it.
-        await batch.commit();
-        ops = 0;
+    // Paginate: a heavy user can have more payments than one query's window
+    // (see PAGE_SIZE below); the old single .get() silently skipped the
+    // rest. Re-query until the user has no payments left. The paid rows are
+    // anonymized (uid redacted) rather than deleted, so they stop matching
+    // the query naturally and pagination terminates.
+    for (;;) {
+      const payments = await db
+        .collection(PAYMENTS_COLLECTION)
+        .where('uid', '==', uid)
+        .limit(PAYMENTS_PAGE_SIZE)
+        .get();
+      if (payments.empty) break;
+
+      for (const doc of payments.docs) {
+        const data = doc.data() || {};
+        if (data.status === 'paid') {
+          // Financial record: anonymize instead of delete.
+          batch.set(
+            doc.ref,
+            {
+              uid: `deleted:${uid.slice(0, 8)}`,
+              deletedAt: new Date(),
+            },
+            { merge: true }
+          );
+          summary.paymentsAnonymized += 1;
+        } else {
+          // Pending/failed orders: delete outright.
+          batch.delete(doc.ref);
+          summary.pendingPaymentsDeleted += 1;
+        }
+        ops += 1;
+        if (ops >= 400) {
+          // Firestore batches cap at 500 ops; stay safely under it.
+          await batch.commit();
+          ops = 0;
+        }
       }
     }
-    if (ops > 0) await batch.commit();
   })().catch((error) => {
     console.error(`[delete-account] Payment cleanup failed for uid=${uid.slice(0, 8)}:`, error);
   });
@@ -231,19 +251,43 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
   let docsFailed = 0;
 
   const batchDeleteDocs = async (refs: FirebaseFirestore.DocumentReference[]) => {
-    const batch = db.batch();
+    let batch = db.batch();
     let ops = 0;
     for (const ref of refs) {
       batch.delete(ref);
       ops += 1;
       if (ops >= 400) {
         await batch.commit();
+        batch = db.batch();
         ops = 0;
       }
     }
     if (ops > 0) await batch.commit();
-    docsDeleted += refs.length;
   };
+
+  /**
+   * Deletes EVERY doc matching `query`, paginating with a cursor so a user
+   * with more than one page of docs is fully wiped. Returns the count of
+   * docs deleted. Throws on query failure so the caller can count it.
+   */
+  async function deleteChatDocsByQuery(
+    query: FirebaseFirestore.Query
+  ): Promise<number> {
+    const PAGE_SIZE = 400;
+    let deleted = 0;
+    // Safety valve: at 400/page this allows ~5M docs before giving up, far
+    // beyond any real chat history, while still bounding runtime if a query
+    // unexpectedly keeps matching its own deletes.
+    const MAX_PAGES = 12500;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const snap = await query.limit(PAGE_SIZE).get();
+      if (snap.empty) break;
+      await batchDeleteDocs(snap.docs.map((d) => d.ref));
+      deleted += snap.size;
+      if (snap.size < PAGE_SIZE) break;
+    }
+    return deleted;
+  }
 
   try {
     const override = getChatCollectionsOverride();
@@ -251,20 +295,24 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
       override.length > 0 ? override : CHAT_STORAGE_SHAPES.UID_FIELD_COLLECTIONS;
 
     // Shape A: top-level collection with an owner uid field on each doc.
+    // Queries paginate (startAfter cursor) so users with more than one
+    // page of messages are FULLY wiped — the old single .limit(1000) get()
+    // silently left residual data, a GDPR problem as heavy users accumulate
+    // thousands of chat docs.
     const shapeAProbes = topLevelCandidates.flatMap((collection) =>
       USER_DATA_FIELD_HINTS.map((field) =>
         withTimeout(
-          db.collection(collection).where(field, '==', uid).limit(1000).get(),
+          deleteChatDocsByQuery(db.collection(collection).where(field, '==', uid)),
           PROBE_TIMEOUT_MS,
           `${collection}.${field}`
         )
-          .then(async (snap) => {
-            if (snap.empty) return;
-            const refs = snap.docs.map((d) => d.ref);
-            await batchDeleteDocs(refs);
-            console.log(
-              `[delete-account] Chat purge: ${refs.length} doc(s) from ${collection} (uid field: ${field})`
-            );
+          .then((deleted) => {
+            if (deleted > 0) {
+              docsDeleted += deleted;
+              console.log(
+                `[delete-account] Chat purge: ${deleted} doc(s) from ${collection} (uid field: ${field})`
+              );
+            }
           })
           .catch((error) => {
             // Unknown collection / missing index — expected for shapes the
@@ -281,15 +329,22 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
     // Shape B: one document per user holding the whole conversation.
     const shapeBProbes = CHAT_STORAGE_SHAPES.PER_USER_DOC_COLLECTIONS.map((collection) =>
       withTimeout(
-        db.collection(collection).doc(uid).get(),
+        db.collection(collection)
+          .doc(uid)
+          .get()
+          .then(async (snap) => {
+            if (!snap.exists) return 0;
+            await batchDeleteDocs([db.collection(collection).doc(uid)]);
+            return 1;
+          }),
         PROBE_TIMEOUT_MS,
         `${collection}/${uid}`
       )
-        .then(async (snap) => {
-          if (!snap.exists) return;
-          const docRef = db.collection(collection).doc(uid);
-          await batchDeleteDocs([docRef]);
-          console.log(`[delete-account] Chat purge: per-user doc ${collection}/${uid}`);
+        .then((deleted) => {
+          docsDeleted += deleted;
+          if (deleted > 0) {
+            console.log(`[delete-account] Chat purge: per-user doc ${collection}/${uid}`);
+          }
         })
         .catch((error) => {
           docsFailed += 1;
@@ -312,15 +367,17 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
           .filter((sub) => knownChatSubs.includes(sub))
           .map((sub) =>
             withTimeout(
-              db.collection('users').doc(uid).collection(sub).limit(1000).get(),
+              deleteChatDocsByQuery(db.collection('users').doc(uid).collection(sub)),
               PROBE_TIMEOUT_MS,
               `users/{uid}/${sub}`
             )
-              .then(async (snap) => {
-                if (snap.empty) return;
-                const refs = snap.docs.map((d) => d.ref);
-                await batchDeleteDocs(refs);
-                console.log(`[delete-account] Chat purge: ${refs.length} doc(s) from users/{uid}/${sub}`);
+              .then((deleted) => {
+                docsDeleted += deleted;
+                if (deleted > 0) {
+                  console.log(
+                    `[delete-account] Chat purge: ${deleted} doc(s) from users/{uid}/${sub}`
+                  );
+                }
               })
               .catch((error) => {
                 docsFailed += 1;

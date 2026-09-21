@@ -1,8 +1,4 @@
-import {
-  Transaction,
-  DocumentReference,
-  DocumentData,
-} from 'firebase-admin/firestore';
+import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
 import { PLAN_CONFIG, PlanType, DEFAULT_PLAN, LimitReachedError } from '../constants';
 import { SUBSCRIPTIONS_COLLECTION, PAYMENTS_COLLECTION } from './subscriptionService';
@@ -36,7 +32,7 @@ function toEpochMs(value: unknown): number | null {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-function normalizeState(data: DocumentData): SubscriptionState {
+function normalizeState(data: Record<string, unknown>): SubscriptionState {
   const planRaw = typeof data.plan === 'string' ? data.plan : '';
   const plan: PlanType = (PLAN_CONFIG as Record<string, unknown>)[planRaw]
     ? (planRaw as PlanType)
@@ -51,48 +47,38 @@ function normalizeState(data: DocumentData): SubscriptionState {
 }
 
 /**
- * Reads subscription state from the server-only `subscriptions/{uid}` doc.
- * On first read, migrates a still-valid paid plan from the legacy
- * `users/{uid}` doc so existing customers keep their plan.
+ * Reads subscription state from the server-only `subscriptions/{uid}` doc
+ * (plain reads, no transaction). On missing doc, falls back to the legacy
+ * `users/{uid}` plan — trusted ONLY when backed by a verified paid payment
+ * record (the users collection may be client-writable).
  */
-async function loadSubscriptionState(
-  transaction: Transaction,
-  uid: string
-): Promise<{ state: SubscriptionState; ref: DocumentReference }> {
-  const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
-  const subSnap = await transaction.get(subRef);
+async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
+  const subSnap = await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).get();
 
   if (subSnap.exists) {
-    return { state: normalizeState(subSnap.data() || {}), ref: subRef };
+    return normalizeState(subSnap.data() || {});
   }
 
-  // Legacy migration: `users/{uid}` may be client-writable, so we only trust
-  // its plan data when it is backed by a verified paid payment record.
-  const userSnap = await transaction.get(db.collection('users').doc(uid));
+  const userSnap = await db.collection('users').doc(uid).get();
   if (userSnap.exists) {
-    const userData = userSnap.data() || {};
+    const userData = (userSnap.data() || {}) as Record<string, unknown>;
     const legacy = normalizeState(userData);
-    const orderId = typeof userData.razorpayOrderId === 'string' ? userData.razorpayOrderId : null;
+    const orderId =
+      typeof userData.razorpayOrderId === 'string' ? userData.razorpayOrderId : null;
     if (
       legacy.plan !== DEFAULT_PLAN &&
       legacy.expiresAt !== null &&
       legacy.expiresAt > Date.now() &&
       orderId !== null
     ) {
-      const paymentSnap = await transaction.get(db.collection(PAYMENTS_COLLECTION).doc(orderId));
+      const paymentSnap = await db.collection(PAYMENTS_COLLECTION).doc(orderId).get();
       if (paymentSnap.exists && paymentSnap.data()?.status === 'paid') {
-        return {
-          state: { ...legacy, lastResetAt: Date.now() },
-          ref: subRef,
-        };
+        return { ...legacy, lastResetAt: Date.now() };
       }
     }
   }
 
-  return {
-    state: { plan: DEFAULT_PLAN, messageCount: 0, lastResetAt: Date.now(), expiresAt: null },
-    ref: subRef,
-  };
+  return { plan: DEFAULT_PLAN, messageCount: 0, lastResetAt: Date.now(), expiresAt: null };
 }
 
 /** Applies subscription expiry: an expired paid plan is downgraded to free. */
@@ -107,124 +93,153 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
   return state;
 }
 
-/**
- * Checks the user's message quota WITHOUT consuming a message.
- * Throws LimitReachedError when the limit is hit. Handles window refresh
- * and subscription expiry the same way the consuming path does.
- */
-export async function checkMessageQuota(uid: string): Promise<UserMessageState> {
-  return await db.runTransaction(async (transaction) => {
-    const { state } = await loadSubscriptionState(transaction, uid);
-    const now = Date.now();
+// ---------------------------------------------------------------------------
+// Plan-state TTL cache
+//
+// The chat persona gate and plan reads used to run inside Firestore
+// transactions on every request. On a warm serverless instance this cache
+// serves repeated reads for the same uid from memory, cutting Firestore load
+// on the hot path. Every write path below (and grantPlanAndMarkPaid /
+// cancelUserSubscription in subscriptionService) invalidates the uid's entry
+// so grants, cancels and quota updates are visible immediately. Worst-case
+// staleness is the TTL.
+// ---------------------------------------------------------------------------
 
-    const active = applyExpiry(state, now);
-    const config = PLAN_CONFIG[active.plan];
+const PLAN_CACHE_TTL_MS = 15_000;
 
-    let messageCount = active.messageCount;
-    let lastResetAt = active.lastResetAt;
+const planCache = new Map<string, { expiresAt: number; value: UserMessageState }>();
 
-    // Refresh window (message quota resets after refreshMs).
-    if (now - lastResetAt >= config.refreshMs) {
-      messageCount = 0;
-      lastResetAt = now;
-    }
-
-    if (messageCount >= config.limit) {
-      throw new LimitReachedError(lastResetAt + config.refreshMs, active.plan);
-    }
-
-    return { plan: active.plan, messageCount, lastResetAt };
-  });
+export function invalidatePlanCache(uid: string): void {
+  planCache.delete(uid);
 }
 
 /**
- * Reads the user's effective plan (with expiry applied) without consuming
- * anything or writing to Firestore. Used by read-only decisions such as
- * server-side persona gating in the chat handler.
+ * Effective plan (expiry applied, window refreshed in the returned numbers)
+ * WITHOUT consuming anything or writing to Firestore. Cached briefly per
+ * uid. Used by read-only decisions such as server-side persona gating.
  */
 export async function getPlanState(uid: string): Promise<UserMessageState> {
-  return await db.runTransaction(async (transaction) => {
-    const { state } = await loadSubscriptionState(transaction, uid);
-    const active = applyExpiry(state, Date.now());
-    return { plan: active.plan, messageCount: active.messageCount, lastResetAt: active.lastResetAt };
-  });
+  const cached = planCache.get(uid);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const state = applyExpiry(await loadSubscriptionState(uid), now);
+  const config = PLAN_CONFIG[state.plan];
+
+  let messageCount = state.messageCount;
+  let lastResetAt = state.lastResetAt;
+  if (now - lastResetAt >= config.refreshMs) {
+    messageCount = 0;
+    lastResetAt = now;
+  }
+
+  const value: UserMessageState = { plan: state.plan, messageCount, lastResetAt };
+  planCache.set(uid, { expiresAt: now + PLAN_CACHE_TTL_MS, value });
+  return value;
 }
 
 /**
  * Consumes one message from the user's quota. Throws LimitReachedError when
  * the limit is hit. Call this only AFTER a successful AI reply so that failed
  * AI calls do not burn the user's message allowance.
+ *
+ * Concurrency: the counter is a single atomic FieldValue.increment(1) on
+ * `subscriptions/{uid}` — no transaction. The old transactional
+ * read-check-write serialized every burst on one doc (~1 write/sec/doc
+ * soft cap), causing transaction retries and 500s under load. The
+ * allow-check reads the pre-increment count, so a hard concurrent burst can
+ * overshoot the plan limit slightly; for a chat quota that is acceptable
+ * (the user genuinely sent those messages), while availability under load
+ * improves dramatically.
+ *
+ * Rare repairs piggyback on the same write: refreshing an expired window
+ * (lastResetAt), persisting an expiry downgrade to free (plan + expiresAt),
+ * and materializing a migrated legacy plan on the user's first message.
  */
 export async function consumeMessage(uid: string): Promise<{ success: true }> {
-  return await db.runTransaction(async (transaction) => {
-    const { state, ref } = await loadSubscriptionState(transaction, uid);
-    const now = Date.now();
+  const now = Date.now();
 
-    const active = applyExpiry(state, now);
-    const config = PLAN_CONFIG[active.plan];
+  const { plan, messageCount, lastResetAt } = await getPlanState(uid);
+  const config = PLAN_CONFIG[plan];
 
-    let messageCount = active.messageCount;
-    let lastResetAt = active.lastResetAt;
+  if (messageCount >= config.limit) {
+    throw new LimitReachedError(lastResetAt + config.refreshMs, plan);
+  }
 
-    // Refresh window (message quota resets after refreshMs).
-    if (now - lastResetAt >= config.refreshMs) {
-      messageCount = 0;
-      lastResetAt = now;
+  const windowExpired = now - lastResetAt >= config.refreshMs;
+
+  try {
+    const fields: Record<string, unknown> = {
+      plan,
+      messageCount: FieldValue.increment(1),
+      updatedAt: now,
+    };
+    if (windowExpired) {
+      fields.lastResetAt = now;
+    }
+    if (plan === DEFAULT_PLAN) {
+      // Free plan (including a just-applied expiry downgrade): clear any
+      // stale expiry so downstream reads see a consistent doc.
+      fields.expiresAt = null;
     }
 
-    if (messageCount >= config.limit) {
-      throw new LimitReachedError(lastResetAt + config.refreshMs, active.plan);
-    }
+    await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
+  } finally {
+    invalidatePlanCache(uid);
+  }
 
-    transaction.set(
-      ref,
-      {
-        plan: active.plan,
-        expiresAt: active.expiresAt,
-        messageCount: messageCount + 1,
-        lastResetAt,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
-
-    return { success: true };
-  });
+  return { success: true };
 }
 
+/**
+ * Read path for GET /api/user/plan: returns current state and, when the
+ * window has rolled over, persists the reset (and any expiry downgrade) so
+ * other endpoints see consistent state. Best-effort writes: a failed reset
+ * write logs but still reports the refreshed numbers.
+ */
 export async function checkAndResetOnly(uid: string): Promise<UserMessageState> {
-  return await db.runTransaction(async (transaction) => {
-    const { state, ref } = await loadSubscriptionState(transaction, uid);
-    const now = Date.now();
+  const now = Date.now();
+  const raw = await loadSubscriptionState(uid);
+  const state = applyExpiry(raw, now);
+  const config = PLAN_CONFIG[state.plan];
 
-    const active = applyExpiry(state, now);
-    const config = PLAN_CONFIG[active.plan];
+  let { messageCount, lastResetAt } = state;
 
-    let messageCount = active.messageCount;
-    let lastResetAt = active.lastResetAt;
-
-    if (now - lastResetAt >= config.refreshMs) {
-      messageCount = 0;
-      lastResetAt = now;
-      transaction.set(
-        ref,
-        {
-          plan: active.plan,
-          expiresAt: active.expiresAt,
-          messageCount: 0,
-          lastResetAt,
-          updatedAt: now,
-        },
-        { merge: true }
-      );
-    } else if (active.plan !== state.plan) {
-      transaction.set(
-        ref,
-        { plan: active.plan, expiresAt: active.expiresAt, updatedAt: now },
-        { merge: true }
-      );
+  if (now - lastResetAt >= config.refreshMs) {
+    messageCount = 0;
+    lastResetAt = now;
+    try {
+      await db
+        .collection(SUBSCRIPTIONS_COLLECTION)
+        .doc(uid)
+        .set(
+          {
+            plan: state.plan,
+            expiresAt: state.expiresAt,
+            messageCount: 0,
+            lastResetAt,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+      invalidatePlanCache(uid);
+    } catch (error) {
+      console.error(`[quota] Window reset write failed uid=${uid.slice(0, 8)}:`, error);
     }
+  } else if (state.plan !== raw.plan || state.expiresAt !== raw.expiresAt) {
+    // Expiry downgraded the plan relative to the stored doc — persist it.
+    try {
+      await db
+        .collection(SUBSCRIPTIONS_COLLECTION)
+        .doc(uid)
+        .set({ plan: state.plan, expiresAt: state.expiresAt, updatedAt: now }, { merge: true });
+      invalidatePlanCache(uid);
+    } catch (error) {
+      console.error(`[quota] Expiry downgrade write failed uid=${uid.slice(0, 8)}:`, error);
+    }
+  }
 
-    return { plan: active.plan, messageCount, lastResetAt };
-  });
+  return { plan: state.plan, messageCount, lastResetAt };
 }
