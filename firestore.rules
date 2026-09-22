@@ -46,6 +46,27 @@ service cloud.firestore {
       // Nobody can LIST users — one user's data is only reachable by that
       // user, never by queries across the collection.
       allow list: if false;
+
+      // ---------------------------------------------------------------
+      // Chat history — written by the APP, stored under the user's own doc:
+      //   users/{uid}/conversations/{id}
+      //   users/{uid}/conversations/{id}/messages/{messageId}
+      //
+      // Firestore rules do NOT cascade to subcollections: without these
+      // matches, every client write fell through to the catch-all deny below,
+      // so the app's chat send threw [firestore/permission-denied] BEFORE it
+      // ever called POST /api/chat — users saw a generic "couldn't respond"
+      // message while the backend logged nothing at all. Access stays scoped
+      // to the owner's own uid.
+      // ---------------------------------------------------------------
+      match /conversations/{conversationId} {
+        // read covers both get and the history screen's list/orderBy query.
+        allow read, write: if isOwner(uid);
+
+        match /messages/{messageId} {
+          allow read, write: if isOwner(uid);
+        }
+      }
     }
 
     // ---------------------------------------------------------------
