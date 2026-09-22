@@ -223,13 +223,24 @@ export async function chatSendHandler(req: Request, res: Response): Promise<void
   // backgrounded). Without this, an abandoned request still runs to
   // completion — paying for AI tokens and consuming the user's quota for a
   // reply they never received.
+  //
+  // IMPORTANT: listen on the RESPONSE, not `req.socket`. On serverless
+  // runtimes (Vercel/Lambda) the request socket is a synthetic stream that
+  // emits 'close' as soon as the request body has been read — not when the
+  // client disconnects — so a `req.socket` listener aborts EVERY request
+  // before the AI call and the handler returns without ever writing a
+  // response (users saw a generic "try again later" while the logs stayed
+  // silent). `res` 'close' fires when the connection actually ends; a fully
+  // written response (`writableEnded`) is not a disconnect.
   const clientGone = new AbortController();
-  const onSocketClose = () => clientGone.abort();
-  req.socket.on('close', onSocketClose);
+  const onResponseClose = () => {
+    if (!res.writableEnded) clientGone.abort();
+  };
+  res.on('close', onResponseClose);
   try {
     await handleChatSend(req as AuthenticatedRequest, res, clientGone.signal);
   } finally {
-    req.socket.removeListener('close', onSocketClose);
+    res.removeListener('close', onResponseClose);
   }
 }
 
@@ -498,6 +509,12 @@ async function handleChatSend(
   }
 
   if (!reply) {
+    // Log synchronously BEFORE responding: the detached observability chain
+    // below may not flush before a serverless instance freezes, and a silent
+    // 503 is what made this look like "users fail but logs are clean".
+    console.error(
+      `[chat uid=${uid}] No reply from any provider (attempts=${attempts.length}) — returning 503 ai_upstream_error`
+    );
     sendJson(res, 503, { error: 'AI service unavailable', code: 'ai_upstream_error' });
     return;
   }
