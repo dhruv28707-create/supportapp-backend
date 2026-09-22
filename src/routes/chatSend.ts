@@ -504,7 +504,7 @@ async function handleChatSend(
   // The client (or its proxy) gave up — do not consume quota, do not attempt
   // to deliver. Return quietly; the socket is already closed.
   if (clientGoneSignal.aborted) {
-    console.log(`[chat uid=${uid}] Client disconnected before reply — not consuming quota`);
+    console.warn(`[chat uid=${uid}] Client disconnected before reply — not consuming quota`);
     return;
   }
 
