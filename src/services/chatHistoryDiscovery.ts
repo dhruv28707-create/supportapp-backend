@@ -40,16 +40,18 @@ export function getChatCollectionsOverride(): string[] {
   return (process.env.CHAT_COLLECTIONS || '')
     .split(',')
     .map((c) => c.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    // Sanitize: allow only simple collection ids (letters/numbers/_/-), no
+    // paths (a/b), no dots — operator-controlled env must not trigger
+    // unexpected collection scans.
+    .filter((c) => /^[A-Za-z0-9_-]{1,64}$/.test(c));
 }
 
 /** All subcollection ids directly under users/{uid}. */
 export async function listUserDocSubcollections(uid: string): Promise<string[]> {
-  try {
-    const snap = await db.collection('users').doc(uid).listCollections();
-    return snap.map((c) => c.id);
-  } catch (error) {
-    console.error('Chat-history subcollection listing failed:', error);
-    return [];
-  }
+  // Throw on failure (don't swallow to []): the caller counts it as
+  // docsFailed so residual Shape-C data is VISIBLE in logs/summary instead
+  // of silently surviving deletion (GDPR risk).
+  const snap = await db.collection('users').doc(uid).listCollections();
+  return snap.map((c) => c.id);
 }

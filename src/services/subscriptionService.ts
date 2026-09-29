@@ -42,11 +42,20 @@ export function computeExpiresAtMs(
 ): number | null {
   if (!tierToPlan(tier)) return null;
 
+  // Month-end clamp + UTC math: Jan 31 +1mo -> Feb 28 (not Mar 3), and no DST
+  // shift. Uses UTC getters/setters throughout.
+  const from = new Date(fromMs);
+  const day = from.getUTCDate();
   const expires = new Date(fromMs);
   if (tier.endsWith('_yearly')) {
-    expires.setFullYear(expires.getFullYear() + 1);
+    expires.setUTCFullYear(expires.getUTCFullYear() + 1);
   } else {
-    expires.setMonth(expires.getMonth() + 1);
+    expires.setUTCMonth(expires.getUTCMonth() + 1);
+  }
+  // Overflowed into the next month (e.g. Feb has no 31st): clamp to the last
+  // day of the intended month.
+  if (expires.getUTCDate() < day) {
+    expires.setUTCDate(0);
   }
   return expires.getTime();
 }
@@ -57,11 +66,12 @@ export function computeExpiresAtMs(
  * ONLY call after the payment has been authoritatively verified
  * (signature + Razorpay payment fetch + amount match).
  *
- * Transaction-free by design: hot paths must never use runTransaction
- * (Firestore serializes transactions on the same doc, causing contention
- * and 500s under burst load). Idempotency is preserved via a read-then-write
- * on payments/{orderId}: the second caller sees status 'paid' and returns
- * the original plan without resetting messageCount or extending expiry.
+ * Transactional on payments/{orderId}: concurrent double-verify/webhook races
+ * on the SAME order serialize here, so the second caller sees status 'paid'
+ * and returns without resetting messageCount or extending expiry. Grants for
+ * DIFFERENT orders touch different docs and never contend. Payment grants are
+ * low-QPS, so the transaction cost is negligible (unlike the hot chat quota
+ * path, which stays transaction-free by design).
  */
 export async function grantPlanAndMarkPaid(
   uid: string,
@@ -73,47 +83,46 @@ export async function grantPlanAndMarkPaid(
   if (!plan) throw new Error('Invalid tier');
 
   const now = Date.now();
-
   const payRef = db.collection(PAYMENTS_COLLECTION).doc(orderId);
-  const paySnap = await payRef.get();
-  const record: DocumentData = paySnap.exists ? paySnap.data() || {} : {};
+  const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
 
-  // Idempotency — a concurrent path already granted this order. Report the
-  // effective plan without re-granting (no messageCount reset, no new
-  // expiry based on now).
-  if (record.status === 'paid') {
-    return tierToPlan(String(record.tier ?? tier)) ?? plan;
-  }
+  const grantedPlan = await db.runTransaction(async (tx) => {
+    const paySnap = await tx.get(payRef);
+    const record: DocumentData = paySnap.exists ? paySnap.data() || {} : {};
 
-  // Defensive re-check (no transaction): the doc must still describe
-  // the same order we verified.
-  if (
-    record.uid !== undefined &&
-    record.uid !== uid &&
-    record.status !== 'paid'
-  ) {
-    throw new Error(`Order ${orderId} belongs to a different uid; refusing to grant`);
-  }
+    // Idempotency — a concurrent path already granted this order. Enforce
+    // ownership even on replay: a different uid claiming a paid order gets a
+    // UID-mismatch error instead of a silent plan leak.
+    if (record.status === 'paid') {
+      if (record.uid !== undefined && record.uid !== uid) {
+        throw new Error(`Order ${orderId} belongs to a different uid; refusing to grant`);
+      }
+      return tierToPlan(String(record.tier ?? tier)) ?? plan;
+    }
 
-  // Use the record's own amount when present so the grant matches what the
-  // order was created with (never a client-supplied value).
-  const recordTier = typeof record.tier === 'string' ? record.tier : tier;
-  const effectivePlan = tierToPlan(recordTier) ?? plan;
-  const expiresAt = computeExpiresAtMs(recordTier);
+    // Defensive re-check: the doc must still describe the same order we verified.
+    if (record.uid !== undefined && record.uid !== uid) {
+      throw new Error(`Order ${orderId} belongs to a different uid; refusing to grant`);
+    }
 
-  const paidFields: PaidPaymentFields = {
-    status: 'paid',
-    razorpay_payment_id: paymentId ?? null,
-    plan: effectivePlan,
-    paidAt: new Date(now),
-    uid,
-    tier: recordTier,
-    amount: typeof record.amount === 'number' ? record.amount : null,
-    grantedAt: now,
-  };
+    // Use the record's own amount when present so the grant matches what the
+    // order was created with (never a client-supplied value).
+    const recordTier = typeof record.tier === 'string' ? record.tier : tier;
+    const effectivePlan = tierToPlan(recordTier) ?? plan;
+    const expiresAt = computeExpiresAtMs(recordTier);
 
-  await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(
-    {
+    const paidFields: PaidPaymentFields = {
+      status: 'paid',
+      razorpay_payment_id: paymentId ?? null,
+      plan: effectivePlan,
+      paidAt: new Date(now),
+      uid,
+      tier: recordTier,
+      amount: typeof record.amount === 'number' ? record.amount : null,
+      grantedAt: now,
+    };
+
+    tx.set(subRef, {
       plan: effectivePlan,
       // Re-grant after a cancel must clear the cancelled marker, or the new
       // paid plan would still read as cancelled downstream.
@@ -123,13 +132,14 @@ export async function grantPlanAndMarkPaid(
       lastResetAt: now,
       updatedAt: now,
       lastOrderId: orderId,
-    },
-    { merge: true }
-  );
+    }, { merge: true });
 
-  await payRef.set(paidFields, { merge: true });
+    tx.set(payRef, paidFields, { merge: true });
 
-  // Keep the plan TTL cache coherent (lazy require avoids a
+    return effectivePlan;
+  });
+
+  // Keep the plan cache coherent (lazy require avoids a
   // messageService <-> subscriptionService import cycle).
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -138,10 +148,10 @@ export async function grantPlanAndMarkPaid(
     };
     invalidatePlanCache(uid);
   } catch {
-    // Cache invalidation is best-effort; the TTL expires on its own.
+    // Cache invalidation is best-effort.
   }
 
-  return effectivePlan;
+  return grantedPlan;
 }
 
 /**

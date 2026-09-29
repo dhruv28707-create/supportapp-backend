@@ -5,8 +5,6 @@ import { razorpay } from '../services/razorpayClient';
 import { grantPlanAndMarkPaid, PAYMENTS_COLLECTION } from '../services/subscriptionService';
 import { timingSafeEqualHex } from '../utils/crypto';
 
-const WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
-
 interface RazorpayWebhookEvent {
   event?: string;
   payload?: {
@@ -66,13 +64,15 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
   }
 
   if (rawBody !== null) {
-    // Signature is computed over the exact raw request bytes.
+    // Signature is computed over the exact raw request bytes. Secret read
+    // lazily per request so rotation/stubbed env takes effect without restart.
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
     const expectedHex = crypto
-      .createHmac('sha256', WEBHOOK_SECRET || '')
+      .createHmac('sha256', webhookSecret || '')
       .update(rawBody)
       .digest('hex');
 
-    if (!WEBHOOK_SECRET || !timingSafeEqualHex(expectedHex, signature)) {
+    if (!webhookSecret || !timingSafeEqualHex(expectedHex, signature)) {
       console.warn('Invalid Razorpay webhook signature');
       res.status(400).json({ error: 'Invalid signature' });
       return;

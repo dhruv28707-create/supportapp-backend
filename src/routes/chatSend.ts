@@ -442,13 +442,16 @@ async function handleChatSend(
   ];
 
   // --- Race primary and fallback STAGGERED IN PARALLEL ---
-  // First success wins: the fallback starts 300ms after the primary, so a
+  // First success wins: the fallback starts STAGGER_MS after the primary, so a
   // slow-but-healthy primary can still win, but a HUNG primary never blocks
   // a fast fallback (the old sequential `for await` waited out the full
   // AI_TIMEOUT_MS on primary even when fallback had already succeeded —
   // mobile clients abort ~10s and saw "AI not responding").
+  // STAGGER is 1500ms (not 300ms): a short stagger fired the fallback on
+  // EVERY slow request and double-billed tokens; 1500ms means the fallback
+  // only fires when the primary is genuinely hung.
   const targetsToTry = PRIMARY.model === FALLBACK.model ? [PRIMARY] : [PRIMARY, FALLBACK];
-  const STAGGER_MS = 300;
+  const STAGGER_MS = 1500;
 
   const candidates = targetsToTry.filter((t) => t.apiKey && !isModelSkipped(t.name));
   // If every candidate is breaker-open, still try (half-open probes resolve

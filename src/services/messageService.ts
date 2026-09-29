@@ -96,37 +96,27 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
 }
 
 // ---------------------------------------------------------------------------
-// Plan-state TTL cache
+// Plan-state reads are always fresh (no in-memory cache).
 //
-// The chat persona gate and plan reads used to run inside Firestore
-// transactions on every request. On a warm serverless instance this cache
-// serves repeated reads for the same uid from memory, cutting Firestore load
-// on the hot path. Every write path below (and grantPlanAndMarkPaid /
-// cancelUserSubscription in subscriptionService) invalidates the uid's entry
-// so grants, cancels and quota updates are visible immediately. Worst-case
-// staleness is the TTL.
+// The old 15s TTL cache was per-instance memory: on serverless every instance
+// held a different view, so a grant/cancel/expiry on instance A was invisible
+// to instance B for up to 15s — a newly-upgraded user could be denied premium
+// personas (or an expired user allowed them). Firestore reads are cheap
+// (~1 read per chat/plan call) and always coherent, so the cache was removed.
+// invalidatePlanCache is kept as a no-op for callers.
 // ---------------------------------------------------------------------------
 
-const PLAN_CACHE_TTL_MS = 15_000;
-
-const planCache = new Map<string, { expiresAt: number; value: UserMessageState }>();
-
-export function invalidatePlanCache(uid: string): void {
-  planCache.delete(uid);
+export function invalidatePlanCache(_uid: string): void {
+  // No-op: reads are uncached, so there is nothing to invalidate.
 }
 
 /**
  * Effective plan (expiry applied, window refreshed in the returned numbers)
- * WITHOUT consuming anything or writing to Firestore. Cached briefly per
- * uid. Used by read-only decisions such as server-side persona gating.
+ * WITHOUT consuming anything or writing to Firestore. Always reads fresh
+ * from Firestore. Used by read-only decisions such as server-side persona gating.
  */
 export async function getPlanState(uid: string): Promise<UserMessageState> {
-  const cached = planCache.get(uid);
   const now = Date.now();
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
-  }
-
   const state = applyExpiry(await loadSubscriptionState(uid), now);
   const config = PLAN_CONFIG[state.plan];
 
@@ -137,9 +127,7 @@ export async function getPlanState(uid: string): Promise<UserMessageState> {
     lastResetAt = now;
   }
 
-  const value: UserMessageState = { plan: state.plan, messageCount, lastResetAt };
-  planCache.set(uid, { expiresAt: now + PLAN_CACHE_TTL_MS, value });
-  return value;
+  return { plan: state.plan, messageCount, lastResetAt };
 }
 
 /**
@@ -257,7 +245,8 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
     }
   } else if (downgraded) {
     // Expiry downgraded the plan relative to the stored doc — persist it and
-    // reset the quota so free starts at 0 (not the paid count).
+    // reset the quota so free starts at 0 (not the paid count). Include
+    // lastResetAt so the next read does not trigger another reset write.
     messageCount = 0;
     try {
       await db
@@ -268,6 +257,7 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
             plan: state.plan,
             expiresAt: state.expiresAt,
             messageCount: 0,
+            lastResetAt: state.lastResetAt,
             updatedAt: now,
           },
           { merge: true }

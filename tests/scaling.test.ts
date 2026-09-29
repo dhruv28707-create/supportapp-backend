@@ -83,8 +83,8 @@ describe('messageService quota (Fix #1: atomic increment)', () => {
   });
 });
 
-describe('plan TTL cache (Fix #1)', () => {
-  it('serves repeated reads from cache and reflects writes after invalidation', async () => {
+describe('plan reads are always fresh (no stale cache)', () => {
+  it('reflects external writes immediately without invalidation', async () => {
     mockDb.collection('subscriptions').doc('u1').set(
       { plan: 'free', messageCount: 0, lastResetAt: Date.now(), expiresAt: null },
       { merge: false }
@@ -93,18 +93,19 @@ describe('plan TTL cache (Fix #1)', () => {
     const first = await getPlanState('u1');
     expect(first.plan).toBe('free');
 
-    // External write (e.g. payment grant) — without invalidation the cache
-    // would serve stale data for the rest of the TTL.
+    // External write (e.g. payment grant) — must be visible immediately
+    // (the old 15s TTL cache served stale data cross-instance).
     mockDb.collection('subscriptions').doc('u1').set(
       { plan: 'pro', messageCount: 0, lastResetAt: Date.now(), expiresAt: null },
       { merge: true }
     );
-    const stale = await getPlanState('u1');
-    expect(stale.plan).toBe('free'); // still cached
-
-    invalidatePlanCache('u1');
     const fresh = await getPlanState('u1');
     expect(fresh.plan).toBe('pro');
+
+    // invalidatePlanCache is a no-op kept for callers.
+    invalidatePlanCache('u1');
+    const stillFresh = await getPlanState('u1');
+    expect(stillFresh.plan).toBe('pro');
   });
 });
 

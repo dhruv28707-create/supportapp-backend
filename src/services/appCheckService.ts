@@ -43,10 +43,11 @@ export async function verifyAppCheckToken(req: Request): Promise<AppCheckResult>
   }
 
   try {
-    // consume: false — verification only; consuming would invalidate the
-    // token after one use, which is unnecessary for a replay-tolerant
-    // throttle (and breaks retried requests).
-    await appCheck.verifyToken(token, { consume: false });
+    // Replay hardening: default consume:false keeps retried requests working
+    // (throttle-tolerant). Set APP_CHECK_CONSUME=true once clients use
+    // single-use tokens to make a stolen token unreplayable.
+    const consume = process.env.APP_CHECK_CONSUME === 'true';
+    await appCheck.verifyToken(token, { consume });
     return 'valid';
   } catch (error) {
     console.warn('[app-check] Token verification failed:', error);

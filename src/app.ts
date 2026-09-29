@@ -26,6 +26,12 @@ export function createApp(): express.Express {
         if (!origin) return callback(null, true);
         callback(null, isOriginAllowed(origin));
       },
+      allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'x-razorpay-signature',
+        'x-firebase-appcheck',
+      ],
     })
   );
 

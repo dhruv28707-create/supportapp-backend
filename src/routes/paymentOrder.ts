@@ -23,6 +23,26 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
 
   const startedAt = Date.now();
 
+  // Throttle FIRST, before touching Razorpay: the old order (create order,
+  // then consume) let a forged client mint unlimited Razorpay orders + orphan
+  // `pending` docs. Burning 1 slot of 10/10min on a failed Razorpay call is
+  // acceptable; unbounded order creation is not.
+  try {
+    await consumeRateLimit(
+      `payment-order:${uid}`,
+      ORDER_RATE_LIMIT_MAX,
+      ORDER_RATE_LIMIT_WINDOW_MS
+    );
+  } catch (error) {
+    if (error instanceof RateLimitExceededError) {
+      res.status(429).json({ error: 'Too many requests, try again later' });
+      return;
+    }
+    console.error('[payment-order] Rate limit check failed:', error);
+    res.status(500).json({ error: 'Internal server error' });
+    return;
+  }
+
   try {
     const amount = TIER_PRICES[tier as Tier];
     const order = await razorpay.orders.create({
@@ -32,14 +52,6 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
     });
     console.log(
       `[payment-order] Razorpay order created in ${Date.now() - startedAt}ms (uid=${uid.slice(0, 8)})`
-    );
-
-    // Count only successfully created orders — failed or timed-out attempts
-    // must not burn the user's budget and lock them out of payment.
-    await consumeRateLimit(
-      `payment-order:${uid}`,
-      ORDER_RATE_LIMIT_MAX,
-      ORDER_RATE_LIMIT_WINDOW_MS
     );
 
     await db.collection(PAYMENTS_COLLECTION).doc(order.id).set({

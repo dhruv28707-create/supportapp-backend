@@ -2,9 +2,6 @@ import { Request, Response } from 'express';
 import { AI_TIMEOUT_MS } from '../constants';
 import { razorpay } from '../services/razorpayClient';
 
-const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b';
-const PRIMARY_MODEL = process.env.PRIMARY_MODEL || 'qwen/qwen3-14b';
-
 /**
  * Diagnostic endpoint (no secrets exposed). Disabled by default — set
  * ENABLE_DIAGNOSE=true in the environment to turn it on, since it reveals
@@ -29,6 +26,11 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
     return;
   }
 
+  // Read lazily per request (not frozen at import) so model overrides take
+  // effect without restart and match chatSend's lazy targets.
+  const primaryModel = process.env.PRIMARY_MODEL || 'qwen/qwen3-14b';
+  const fallbackModel = process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b';
+
   const env = {
     OPENROUTER_API_KEY: Boolean(process.env.OPENROUTER_API_KEY),
     GROQ_API_KEY: Boolean(process.env.GROQ_API_KEY),
@@ -46,8 +48,8 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
     ok: true,
     service: 'supportapp-backend',
     time: new Date().toISOString(),
-    primaryModel: PRIMARY_MODEL,
-    fallbackModel: FALLBACK_MODEL,
+    primaryModel,
+    fallbackModel,
     env,
   };
 
@@ -109,7 +111,7 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: FALLBACK_MODEL,
+        model: fallbackModel,
         messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
         // Enough for a short diagnostic reply; a healthy result should show
         // reply != null.

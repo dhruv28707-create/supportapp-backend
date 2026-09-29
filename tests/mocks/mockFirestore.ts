@@ -92,6 +92,29 @@ export class MockFirestore {
   entries(): Array<[string, Record<string, unknown>]> {
     return [...this.store.entries()];
   }
+
+  /** Minimal runTransaction: executes fn with get/set against the same store.
+   *  Serial in tests (single-threaded), but proves the transactional call path.
+   */
+  async runTransaction<T>(fn: (tx: MockTransaction) => Promise<T>): Promise<T> {
+    return fn(new MockTransaction(this));
+  }
+}
+
+export class MockTransaction {
+  constructor(private readonly fs: MockFirestore) {}
+
+  async get(ref: MockDocRef): Promise<MockDocSnapshot> {
+    return ref.get();
+  }
+
+  set(ref: MockDocRef, data: Record<string, unknown>, opts?: { merge?: boolean }): void {
+    this.fs.set(ref.path, data, opts?.merge ?? false);
+  }
+
+  delete(ref: MockDocRef): void {
+    this.fs.delete(ref.path);
+  }
 }
 
 export class MockDocRef {

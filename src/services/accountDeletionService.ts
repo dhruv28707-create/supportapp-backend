@@ -92,6 +92,14 @@ export interface DeletionSummary {
 
 /** Deletes or anonymizes all server-side data tied to the user. */
 export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
+  // TOCTOU guard: re-check the subscription INSIDE the wipe path (not just in
+  // the route). A grant racing between the route's 409 check and this delete
+  // must block instead of wiping an active payer.
+  const activeExpiry = await getActiveSubscriptionExpiry(uid);
+  if (activeExpiry) {
+    throw new DeletionBlockedError(activeExpiry);
+  }
+
   const summary: DeletionSummary = {
     subscriptionDeleted: false,
     userDocDeleted: false,
@@ -103,32 +111,33 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
   };
   const startedAt = Date.now();
 
-  // 1) Subscription state (server-only quota/plan doc).
-  const deleteSubscription = db
-    .collection(SUBSCRIPTIONS_COLLECTION)
-    .doc(uid)
-    .delete()
-    .then(() => {
+  // 1) Subscription state (server-only quota/plan doc). Check existence first
+  // so the summary does not over-report success on absent docs.
+  const deleteSubscription = (async () => {
+    try {
+      const snap = await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).get();
+      if (!snap.exists) return;
+      await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).delete();
       summary.subscriptionDeleted = true;
-    })
-    .catch((error) => {
+    } catch (error) {
       console.error(
         `[delete-account] Failed to delete subscription for uid=${uid.slice(0, 8)}:`,
         error
       );
-    });
+    }
+  })();
 
   // 2) users/{uid} profile doc (client-visible profile; safe to remove).
-  const deleteUserDoc = db
-    .collection('users')
-    .doc(uid)
-    .delete()
-    .then(() => {
+  const deleteUserDoc = (async () => {
+    try {
+      const snap = await db.collection('users').doc(uid).get();
+      if (!snap.exists) return;
+      await db.collection('users').doc(uid).delete();
       summary.userDocDeleted = true;
-    })
-    .catch((error) => {
+    } catch (error) {
       console.error(`[delete-account] Failed to delete user doc for uid=${uid.slice(0, 8)}:`, error);
-    });
+    }
+  })();
 
   // 3) Payment records owned by the user.
   const cleanupPayments = (async () => {
@@ -270,16 +279,19 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
   ): Promise<number> {
     const PAGE_SIZE = 400;
     let deleted = 0;
-    // Safety valve: at 400/page this allows ~5M docs before giving up, far
-    // beyond any real chat history, while still bounding runtime if a query
-    // unexpectedly keeps matching its own deletes.
-    const MAX_PAGES = 12500;
+    // Bounded for the 60s function budget: 400/page x 25 pages = ~10k docs max
+    // per probe. Beyond that the summary reports docsFailed so residual data
+    // is VISIBLE instead of silently looping until timeout.
+    const MAX_PAGES = 25;
     for (let page = 0; page < MAX_PAGES; page++) {
       const snap = await query.limit(PAGE_SIZE).get();
       if (snap.empty) break;
       await batchDeleteDocs(snap.docs.map((d) => d.ref));
       deleted += snap.size;
       if (snap.size < PAGE_SIZE) break;
+      if (page === MAX_PAGES - 1) {
+        throw new Error(`purge page cap reached (${MAX_PAGES} pages) — residual data may remain`);
+      }
     }
     return deleted;
   }

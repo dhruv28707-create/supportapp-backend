@@ -44,8 +44,11 @@ export function enforceCors(req: Request, res: Response): boolean {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, x-razorpay-signature'
+    'Content-Type, Authorization, x-razorpay-signature, x-firebase-appcheck'
   );
+  // Cache per-origin: without Vary, a CDN can serve the wrong
+  // Access-Control-Allow-Origin to a different origin.
+  res.setHeader('Vary', 'Origin');
 
   const origin = req.headers?.origin;
 

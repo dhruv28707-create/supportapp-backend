@@ -50,11 +50,8 @@ vi.mock('firebase-admin', () => {
   const firestoreFacade = {
     collection: (name: string) => mockDb.collection(name),
     batch: () => new MockWriteBatch(mockDb),
-    // messageService no longer uses transactions, but keep a loud fallback
-    // so any regression back to transactions fails tests immediately.
-    runTransaction: async () => {
-      throw new Error('runTransaction called — hot paths must be transaction-free');
-    },
+    // Transactional grant path (subscriptionService) runs through here.
+    runTransaction: (fn: (tx: unknown) => Promise<unknown>) => mockDb.runTransaction(fn as never),
     listCollections: async () => [],
   };
   const admin = {

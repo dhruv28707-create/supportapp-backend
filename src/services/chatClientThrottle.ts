@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { createHmac } from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
 import { RateLimitExceededError } from './rateLimitService';
@@ -24,9 +24,9 @@ import { RateLimitExceededError } from './rateLimitService';
  * with the per-uid counter doc, and so a different limit profile can be
  * applied without touching uid quotas.
  *
- * PRIVACY: IPs are hashed (sha256, truncated) before becoming doc ids, so
- * rate-limit docs are not personal data. Fail-open on storage errors, like
- * every limiter in this codebase.
+ * PRIVACY: IPs are HMAC-hashed with a server secret before becoming doc ids,
+ * so rate-limit docs are not reversible personal data. Fail-open on storage
+ * errors, like every limiter in this codebase.
  */
 
 export const IP_LIMITS_COLLECTION = 'ipLimits';
@@ -36,7 +36,15 @@ export const CHAT_IP_RATE_LIMIT_WINDOW_MS =
   Number(process.env.CHAT_IP_RATE_LIMIT_WINDOW_MS) || 5 * 60 * 1000;
 
 function hashIp(ip: string): string {
-  return createHash('sha256').update(ip).digest('hex').slice(0, 32);
+  // HMAC with a server-side secret (not plain SHA256): a truncated plain hash
+  // of an IPv4 address is reversible by enumerating 2^32 values. HMAC with an
+  // operator-controlled secret is not. Falls back to a documented dev default
+  // when no secret is configured — production must set IP_HASH_SECRET.
+  const secret =
+    process.env.IP_HASH_SECRET ||
+    process.env.RAZORPAY_WEBHOOK_SECRET ||
+    'dev-only-ip-hash-secret';
+  return createHmac('sha256', secret).update(ip).digest('hex');
 }
 
 /**
