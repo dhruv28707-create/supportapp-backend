@@ -65,7 +65,7 @@ export const AI_TIMEOUT_MS = 15000;
 // Prices in paise (₹1 = 100 paise). Single source of truth for order amounts.
 export const TIER_PRICES = {
   pro_monthly: 17900, // ₹179
-  pro_yearly: 69900, // ₹699
+  pro_yearly: 1000, // ₹699
   ultimate_monthly: 19900, // ₹199
   ultimate_yearly: 79900, // ₹799
 } as const;
