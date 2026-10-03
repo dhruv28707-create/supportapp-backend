@@ -1,6 +1,12 @@
 import { db } from '../config/firebaseAdmin';
 import { DocumentData } from 'firebase-admin/firestore';
-import { tierToPlan, PlanType, DEFAULT_PLAN } from '../constants';
+import {
+  tierToPlan,
+  PlanType,
+  DEFAULT_PLAN,
+  TRIAL_PLAN,
+  ULTIMATE_TRIAL_MS,
+} from '../constants';
 
 /** Fields written by grantPlanAndMarkPaid into the payments doc (merge). */
 interface PaidPaymentFields {
@@ -132,6 +138,11 @@ export async function grantPlanAndMarkPaid(
       lastResetAt: now,
       updatedAt: now,
       lastOrderId: orderId,
+      // A purchase replaces any free-trial state; `trialUsed` is deliberately
+      // NOT touched here (merge preserves it) so a trialing user can never
+      // start a second trial after they subscribe.
+      isTrial: false,
+      trialEndsAt: null,
     }, { merge: true });
 
     tx.set(payRef, paidFields, { merge: true });
@@ -192,6 +203,10 @@ export async function cancelUserSubscription(uid: string): Promise<boolean> {
       lastOrderId: typeof data.lastOrderId === 'string' ? data.lastOrderId : null,
       cancelledAt: new Date(now),
       updatedAt: now,
+      // Cancelling a free trial ends it cleanly; `trialUsed` stays true so it
+      // cannot be restarted (merge preserves the field).
+      isTrial: false,
+      trialEndsAt: null,
     },
     { merge: true }
   );
@@ -207,4 +222,84 @@ export async function cancelUserSubscription(uid: string): Promise<boolean> {
   }
 
   return true;
+}
+
+/** Why a trial start was refused. */
+export type TrialRefusalCode = 'trial_already_used' | 'already_subscribed';
+
+export class TrialNotAllowedError extends Error {
+  constructor(public readonly code: TrialRefusalCode) {
+    super(
+      code === 'trial_already_used'
+        ? 'Free trial already used'
+        : 'Account already has an active plan'
+    );
+    this.name = 'TrialNotAllowedError';
+  }
+}
+
+export interface TrialGrant {
+  plan: PlanType;
+  startedAt: number;
+  expiresAt: number;
+}
+
+/**
+ * Grants the 5-day Ultimate free trial, transactionally and idempotently.
+ *
+ * The transaction on subscriptions/{uid} makes the one-trial-per-account
+ * guard atomic: two concurrent calls both read the doc, but the second sees
+ * `trialUsed: true` (or the trial plan) and is refused — never two grants.
+ *
+ * Account-age eligibility (new users only) is enforced by the ROUTE before
+ * calling this, since it needs the Firebase Auth user record.
+ *
+ * Callers must NOT depend on a Razorpay order: no payment is involved.
+ */
+export async function startUltimateTrial(uid: string): Promise<TrialGrant> {
+  const now = Date.now();
+  const expiresAt = now + ULTIMATE_TRIAL_MS;
+  const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
+
+  const granted = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(subRef);
+    const data = snap.exists ? snap.data() || {} : {};
+
+    if (data.trialUsed === true) {
+      throw new TrialNotAllowedError('trial_already_used');
+    }
+
+    const rawPlan = typeof data.plan === 'string' ? data.plan : '';
+    const currentPlan: PlanType =
+      rawPlan === 'pro' ? 'pro' : rawPlan === 'ultimate' ? 'ultimate' : DEFAULT_PLAN;
+    if (currentPlan !== DEFAULT_PLAN) {
+      throw new TrialNotAllowedError('already_subscribed');
+    }
+
+    tx.set(
+      subRef,
+      {
+        plan: TRIAL_PLAN,
+        status: 'active',
+        isTrial: true,
+        trialStartedAt: now,
+        trialEndsAt: expiresAt,
+        // Permanent marker: merge writes elsewhere never clear it.
+        trialUsed: true,
+        // expiresAt drives the existing applyExpiry downgrade, so the trial
+        // ends through the same code path as a paid term.
+        expiresAt,
+        messageCount: 0,
+        lastResetAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return { plan: TRIAL_PLAN, startedAt: now, expiresAt };
+  });
+
+  // No cache invalidation needed: plan reads are uncached (invalidatePlanCache
+  // is a no-op), so the new trial is visible immediately everywhere.
+  return granted;
 }

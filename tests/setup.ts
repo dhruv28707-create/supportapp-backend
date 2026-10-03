@@ -35,6 +35,8 @@ export const mockAuth = {
   verifyIdToken: vi.fn(),
   revokeRefreshTokens: vi.fn(),
   deleteUser: vi.fn(),
+  // Used for the free-trial new-account eligibility check (metadata.creationTime).
+  getUser: vi.fn(),
 };
 
 export const mockAppCheck = {
@@ -111,6 +113,13 @@ export function resetAll(): void {
   mockAuth.verifyIdToken.mockReset();
   mockAuth.revokeRefreshTokens.mockReset();
   mockAuth.deleteUser.mockReset();
+  mockAuth.getUser.mockReset();
+  // Default: a brand-new account, so trial eligibility passes unless a test
+  // overrides creationTime to simulate an old account.
+  mockAuth.getUser.mockResolvedValue({
+    uid: 'u1',
+    metadata: { creationTime: new Date().toISOString() },
+  });
   mockAppCheck.verifyToken.mockReset();
   mockRazorpayOrdersCreate.mockReset();
   mockRazorpayPaymentsFetch.mockReset();

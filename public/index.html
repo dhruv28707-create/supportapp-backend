@@ -31,6 +31,38 @@
     .post { color: #e0af68; }
     .auth-yes { color: #f7768e; }
     .auth-no { color: #9aa1b2; }
+    h2 { color: #e6e8ee; margin-top: 2rem; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.9rem;
+      margin: 1rem 0 0.5rem;
+    }
+    .card {
+      border: 1px solid #262b3a;
+      border-radius: 12px;
+      padding: 1rem 1.1rem;
+      background: #171a23;
+      display: flex;
+      flex-direction: column;
+    }
+    .card.recommended { border-color: #7aa2f7; box-shadow: 0 0 0 1px #7aa2f7 inset; }
+    .card h3 { margin: 0; font-size: 1.05rem; color: #e6e8ee; }
+    .card .price { font-size: 1.5rem; font-weight: 700; color: #7aa2f7; margin: 0.35rem 0 0.1rem; }
+    .card .price small { font-size: 0.72rem; font-weight: 400; color: #9aa1b2; }
+    .card ul { margin: 0.6rem 0 0; padding-left: 1.1rem; color: #b9c0cf; font-size: 0.86em; }
+    .card .badge {
+      align-self: flex-start;
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #12141a;
+      background: #7aa2f7;
+      border-radius: 999px;
+      padding: 0.1rem 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .card .cta { margin-top: auto; padding-top: 0.75rem; color: #9aa1b2; font-size: 0.8em; }
     footer { margin-top: 2rem; color: #9aa1b2; font-size: 0.88em; }
   </style>
 </head>
@@ -41,12 +73,27 @@
   <p>All endpoints live under <code>/api/*</code> and speak JSON. Errors use the shape
   <code>{ "error": "message" }</code>.</p>
 
+  <h2>Choose your plan</h2>
+  <p class="tagline">New here? Start with <strong>5 free days of Ultimate</strong> &mdash; no payment.
+  When the trial ends, pick one:</p>
+  <div class="cards" id="plan-cards" aria-live="polite"></div>
+
   <table>
     <tr><th>Endpoint</th><th>Auth</th><th>Purpose</th></tr>
     <tr>
       <td><span class="method get">GET</span> <code>/api/health</code></td>
       <td class="auth-no">none</td>
       <td>Liveness check.</td>
+    </tr>
+    <tr>
+      <td><span class="method get">GET</span> <code>/api/plans</code></td>
+      <td class="auth-no">none</td>
+      <td>Choice cards: free, Ultimate monthly, Ultimate yearly (prices included).</td>
+    </tr>
+    <tr>
+      <td><span class="method post">POST</span> <code>/api/trial/start</code></td>
+      <td class="auth-yes">Bearer token</td>
+      <td>Start the 5-day Ultimate free trial (new accounts, once per account).</td>
     </tr>
     <tr>
       <td><span class="method post">POST</span> <code>/api/chat</code></td>
@@ -84,5 +131,46 @@
   <code>Authorization: Bearer &lt;idToken&gt;</code></p>
 
   <footer>See the repository README for the full API reference and setup guide.</footer>
+
+  <script>
+    // Render the plan-choice cards from the public catalog, so the displayed
+    // price always matches what the API charges. No auth needed to view.
+    (function () {
+      var wrap = document.getElementById('plan-cards');
+      if (!wrap) return;
+      function esc(value) {
+        return String(value).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+      }
+      fetch('/api/plans')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || !Array.isArray(data.options)) return;
+          wrap.innerHTML = data.options
+            .map(function (o) {
+              var price = o.amount === 0
+                ? 'Free'
+                : '&#8377;' + esc(o.amount) + '<small> / ' + esc(o.period || '') + '</small>';
+              var features = (o.highlights || []).map(function (h) { return '<li>' + esc(h) + '</li>'; }).join('');
+              var badge = o.recommended ? '<span class="badge">Most popular</span>' : '';
+              var cta = o.tier ? 'Checkout in the app' : 'Just keep using Free';
+              return (
+                '<div class="card' + (o.recommended ? ' recommended' : '') + '">' +
+                badge +
+                '<h3>' + esc(o.label) + '</h3>' +
+                '<div class="price">' + price + '</div>' +
+                '<ul>' + features + '</ul>' +
+                '<div class="cta">' + cta + '</div>' +
+                '</div>'
+              );
+            })
+            .join('');
+        })
+        .catch(function () {
+          wrap.innerHTML = '<p class="tagline">Plan options are temporarily unavailable.</p>';
+        });
+    })();
+  </script>
 </body>
 </html>

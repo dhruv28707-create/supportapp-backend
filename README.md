@@ -105,11 +105,64 @@ Current plan and quota state. **Auth required.**
   "plan": "free",
   "messagesRemaining": 17,
   "nextRefreshAt": 1756160000000,
-  "isLimitReached": false
+  "isLimitReached": false,
+  "isTrial": false,
+  "trialEndsAt": null,
+  "trialUsed": false,
+  "trialAvailable": true
 }
 ```
 
+`isTrial`/`trialEndsAt` describe an active 5-day Ultimate trial; `trialUsed` is permanent (true once the account has ever trialed); `trialAvailable` is the client hint for showing the "Start free trial" CTA (only true for a free account that is still new and has never trialed — the trial endpoint re-checks server-side).
+
 Plan limits (`src/constants.ts`): free 20 msgs / 5h · pro 80 / 4h · ultimate 200 / 2h.
+
+### GET /api/plans
+
+Public pricing catalog for the post-trial choice cards. No auth.
+
+```json
+{
+  "currency": "INR",
+  "options": [
+    { "id": "free", "plan": "free", "tier": null, "label": "Free", "amount": 0, "amountPaise": 0, "period": null, "recommended": false },
+    { "id": "ultimate_monthly", "plan": "ultimate", "tier": "ultimate_monthly", "label": "Ultimate Monthly", "amount": 199, "amountPaise": 19900, "period": "monthly", "recommended": true },
+    { "id": "ultimate_yearly", "plan": "ultimate", "tier": "ultimate_yearly", "label": "Ultimate Yearly", "amount": 799, "amountPaise": 79900, "period": "yearly", "recommended": false }
+  ]
+}
+```
+
+Render each option as a card. Paid cards pass `tier` to `POST /api/payment-order`; the free card needs no request (the account is already on free once the trial ends). Prices come from `TIER_PRICES`, so the shown amount always matches what the server charges.
+
+### POST /api/trial/start
+
+Start the **5-day Ultimate free trial**. **Auth required.** New accounts only; once per account, ever. No payment or Razorpay order is involved.
+
+Eligibility (all server-side): the account's Firebase `metadata.creationTime` must be within `TRIAL_ELIGIBILITY_WINDOW_DAYS` (default 7), the account must never have trialed (`trialUsed`), and it must not already be on a paid plan.
+
+Success:
+
+```json
+{
+  "success": true,
+  "isTrial": true,
+  "plan": "ultimate",
+  "trialDays": 5,
+  "startedAt": "2026-10-03T10:00:00.000Z",
+  "trialEndsAt": "2026-10-08T10:00:00.000Z",
+  "expiresAt": "2026-10-08T10:00:00.000Z"
+}
+```
+
+Errors:
+
+| Status | Meaning |
+|---|---|
+| 403 | `{ code: 'trial_not_eligible' }` — account older than the window |
+| 409 | `{ code: 'trial_already_used' }` — this account already trialed |
+| 409 | `{ code: 'already_subscribed' }` — account already has a paid plan |
+
+Behavior: during the trial the user gets full Ultimate perks (all 12 personas, 200 msgs / 2h). When the 5 days end, the existing expiry downgrade returns them to `free`; the app then shows the `/api/plans` choice cards (free / monthly / yearly). A trial **never blocks `DELETE /api/account`**, and `POST /api/payment-cancel` ends it early (immediate downgrade). Buying an Ultimate tier at any point replaces the trial and keeps `trialUsed` set, so a trial can never be restarted.
 
 ### POST /api/payment-order
 
@@ -184,6 +237,7 @@ Diagnostics — **disabled by default.** Set `ENABLE_DIAGNOSE=true` to enable (d
 - Payment flow: `POST /api/payment-order` → open Razorpay Checkout with `orderId`, `amount`, `currency`, `keyId` → on success call `POST /api/payment-verify` with the three checkout fields. Safe to retry verify on network failures.
 - Refresh plan/quota from `GET /api/user/plan` after app resume or payment success.
 - Account deletion: do NOT delete Firestore docs from the client first (the rules deny it — `[firestore/permission-denied]`). Call `POST /api/payment-cancel` if there is an active subscription, then `DELETE /api/account`, then just `auth().signOut()`. The backend wipes all server-side data, including the Firebase Auth account and chat history — `currentUser.delete()` after the API call throws `[auth/no-current-user]`. If an older build still calls it, catch `auth/no-current-user` / `auth/user-not-found` and treat them as success.
+- Free trial: when `GET /api/user/plan` returns `trialAvailable: true`, show a "Start 5 days of Ultimate free" CTA that calls `POST /api/trial/start`. While `isTrial` is true, surface `trialEndsAt` (e.g. "Trial ends in 3 days"). Once `isTrial` flips back to false, fetch `GET /api/plans` and render the free / monthly / yearly **choice cards** (a cancel or trial end takes the user straight there). Treat a 409 `trial_already_used` / `already_subscribed` as "hide the CTA".
 
 ## Environment variables
 

@@ -10,6 +10,8 @@ import { paymentVerifyHandler } from './routes/paymentVerify';
 import { paymentCancelHandler } from './routes/paymentCancel';
 import { deleteAccountHandler } from './routes/accountDelete';
 import { diagnoseHandler } from './routes/diagnose';
+import { trialStartHandler } from './routes/trialStart';
+import { plansHandler } from './routes/plans';
 import { isOriginAllowed } from './config/cors';
 import { db } from './config/firebaseAdmin';
 
@@ -54,10 +56,14 @@ export function createApp(): express.Express {
 
   app.get('/api/diagnose', diagnoseHandler);
 
+  app.get('/api/plans', plansHandler);
+
   app.get('/api/user/plan', authMiddleware, getUserPlanHandler);
 
   app.post('/api/chat', authMiddleware, chatSendHandler);
   app.post('/api/chat/send', authMiddleware, chatSendHandler);
+
+  app.post('/api/trial/start', authMiddleware, trialStartHandler);
 
   app.post('/api/payment-order', authMiddleware, paymentOrderHandler);
   app.post('/api/payment-verify', authMiddleware, paymentVerifyHandler);

@@ -7,6 +7,12 @@ export interface UserMessageState {
   plan: PlanType;
   messageCount: number;
   lastResetAt: number;
+  /** True while the 5-day Ultimate free trial is active. */
+  isTrial: boolean;
+  /** Trial end (epoch ms) while a trial is active, else null. */
+  trialEndsAt: number | null;
+  /** Permanent: the account has consumed its one free trial. */
+  trialUsed: boolean;
 }
 
 interface SubscriptionState {
@@ -14,6 +20,9 @@ interface SubscriptionState {
   messageCount: number;
   lastResetAt: number;
   expiresAt: number | null;
+  isTrial: boolean;
+  trialEndsAt: number | null;
+  trialUsed: boolean;
 }
 
 function toEpochMs(value: unknown): number | null {
@@ -43,6 +52,9 @@ function normalizeState(data: Record<string, unknown>): SubscriptionState {
     messageCount: typeof data.messageCount === 'number' ? data.messageCount : 0,
     lastResetAt: typeof data.lastResetAt === 'number' ? data.lastResetAt : 0,
     expiresAt: toEpochMs(data.expiresAt),
+    isTrial: data.isTrial === true,
+    trialEndsAt: toEpochMs(data.trialEndsAt),
+    trialUsed: data.trialUsed === true,
   };
 }
 
@@ -78,7 +90,15 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
     }
   }
 
-  return { plan: DEFAULT_PLAN, messageCount: 0, lastResetAt: Date.now(), expiresAt: null };
+  return {
+    plan: DEFAULT_PLAN,
+    messageCount: 0,
+    lastResetAt: Date.now(),
+    expiresAt: null,
+    isTrial: false,
+    trialEndsAt: null,
+    trialUsed: false,
+  };
 }
 
 /** Applies subscription expiry: an expired paid plan is downgraded to free. */
@@ -89,8 +109,17 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
     now >= state.expiresAt
   ) {
     // Downgrade resets quota so the user starts fresh on free (otherwise a
-    // heavy paid user would land on free with 0 remaining messages).
-    return { ...state, plan: DEFAULT_PLAN, expiresAt: null, messageCount: 0 };
+    // heavy paid user would land on free with 0 remaining messages). A trial
+    // ends through this exact path; `trialUsed` is preserved by the spread so
+    // the account can never trial again.
+    return {
+      ...state,
+      plan: DEFAULT_PLAN,
+      expiresAt: null,
+      messageCount: 0,
+      isTrial: false,
+      trialEndsAt: null,
+    };
   }
   return state;
 }
@@ -127,7 +156,14 @@ export async function getPlanState(uid: string): Promise<UserMessageState> {
     lastResetAt = now;
   }
 
-  return { plan: state.plan, messageCount, lastResetAt };
+  return {
+    plan: state.plan,
+    messageCount,
+    lastResetAt,
+    isTrial: state.isTrial,
+    trialEndsAt: state.trialEndsAt,
+    trialUsed: state.trialUsed,
+  };
 }
 
 /**
@@ -184,6 +220,10 @@ export async function consumeMessage(uid: string): Promise<{ success: true }> {
         messageCount: 1,
         lastResetAt: effectiveReset,
         updatedAt: now,
+        // `state` is post-applyExpiry: an expired trial is already cleared
+        // here (isTrial false / trialEndsAt null) while trialUsed persists.
+        isTrial: state.isTrial,
+        trialEndsAt: state.trialEndsAt,
       };
       await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
     } else {
@@ -194,8 +234,10 @@ export async function consumeMessage(uid: string): Promise<{ success: true }> {
       };
       if (state.plan === DEFAULT_PLAN) {
         // Free plan (including a just-applied expiry downgrade): clear any
-        // stale expiry so downstream reads see a consistent doc.
+        // stale expiry/trial fields so downstream reads see a consistent doc.
         fields.expiresAt = null;
+        fields.isTrial = false;
+        fields.trialEndsAt = null;
       }
 
       await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
@@ -236,6 +278,8 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
             messageCount: 0,
             lastResetAt,
             updatedAt: now,
+            isTrial: state.isTrial,
+            trialEndsAt: state.trialEndsAt,
           },
           { merge: true }
         );
@@ -259,6 +303,8 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
             messageCount: 0,
             lastResetAt: state.lastResetAt,
             updatedAt: now,
+            isTrial: state.isTrial,
+            trialEndsAt: state.trialEndsAt,
           },
           { merge: true }
         );
@@ -268,5 +314,12 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
     }
   }
 
-  return { plan: state.plan, messageCount, lastResetAt };
+  return {
+    plan: state.plan,
+    messageCount,
+    lastResetAt,
+    isTrial: state.isTrial,
+    trialEndsAt: state.trialEndsAt,
+    trialUsed: state.trialUsed,
+  };
 }

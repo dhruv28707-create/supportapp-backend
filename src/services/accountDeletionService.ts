@@ -228,6 +228,7 @@ async function cleanupRateLimitCounters(uid: string): Promise<void> {
     'payment-verify:',
     'payment-cancel:',
     'delete-account:',
+    'trial-start:',
   ];
 
   const batch = db.batch();
@@ -446,6 +447,10 @@ export async function getActiveSubscriptionExpiry(uid: string): Promise<string |
   // POST /api/payment-cancel (or the doc was already flipped). Only an ACTIVE
   // paid term is a reason to refuse deleting the account.
   if (normalizeStatus(data.status) === 'cancelled') return null;
+
+  // A free trial carries no payment obligation, so it never blocks deletion
+  // (product decision: users may delete at any point during the trial).
+  if (data.isTrial === true) return null;
 
   const expires = data.expiresAt;
   let expiresMs: number | null = null;
