@@ -27,15 +27,27 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
   }
 
   // Read lazily per request (not frozen at import) so model overrides take
-  // effect without restart and match chatSend's lazy targets.
-  const primaryModel = process.env.PRIMARY_MODEL || 'qwen/qwen3-14b';
-  const fallbackModel = process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b';
+  // effect without restart and match chatSend's lazy targets. Groq answers
+  // first by default (it is much faster); the legacy *_MODEL names are still
+  // honored so an existing deployment's overrides keep applying.
+  const primaryProvider =
+    (process.env.CHAT_PRIMARY_PROVIDER || '').toLowerCase() === 'openrouter'
+      ? 'openrouter'
+      : 'groq';
+  const groqModel =
+    process.env.GROQ_MODEL || process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b';
+  const openRouterModel =
+    process.env.OPENROUTER_MODEL || process.env.PRIMARY_MODEL || 'qwen/qwen3-14b';
+  const primaryModel = primaryProvider === 'groq' ? groqModel : openRouterModel;
+  const fallbackModel = primaryProvider === 'groq' ? openRouterModel : groqModel;
 
   const env = {
     OPENROUTER_API_KEY: Boolean(process.env.OPENROUTER_API_KEY),
     GROQ_API_KEY: Boolean(process.env.GROQ_API_KEY),
     PRIMARY_MODEL: process.env.PRIMARY_MODEL || null,
     FALLBACK_MODEL: process.env.FALLBACK_MODEL || null,
+    GROQ_MODEL: process.env.GROQ_MODEL || null,
+    OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || null,
     FIREBASE_PROJECT_ID: Boolean(process.env.FIREBASE_PROJECT_ID),
     FIREBASE_CLIENT_EMAIL: Boolean(process.env.FIREBASE_CLIENT_EMAIL),
     FIREBASE_PRIVATE_KEY: Boolean(process.env.FIREBASE_PRIVATE_KEY),
@@ -48,6 +60,7 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
     ok: true,
     service: 'supportapp-backend',
     time: new Date().toISOString(),
+    primaryProvider,
     primaryModel,
     fallbackModel,
     env,

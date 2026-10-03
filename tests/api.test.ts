@@ -69,14 +69,34 @@ describe('Chat endpoints (the 404 regression)', () => {
     expect(mockDb.get('subscriptions/u1')).toBeUndefined();
   });
 
-  it('fails over to the fallback immediately when the primary errors fast', async () => {
+  it('answers from Groq first (fast provider is primary) and keeps OpenRouter as fallback', async () => {
     primeAuth('u1');
-    // Primary (OpenRouter) dies instantly; fallback (Groq) answers.
+    // Both providers answer, with distinct text: whichever one is PRIMARY
+    // should win. Groq is primary by default.
     mockFetch.mockImplementation(async (url: string) => {
       if (String(url).includes('groq')) {
-        return jsonResponse({ choices: [{ message: { content: 'from fallback' } }] });
+        return jsonResponse({ choices: [{ message: { content: 'from groq' } }] });
       }
-      return jsonResponse({ error: { message: 'primary down' } }, 500);
+      return jsonResponse({ choices: [{ message: { content: 'from openrouter' } }] });
+    });
+
+    const res = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'hi', personality: 'Friend' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reply).toBe('from groq');
+  });
+
+  it('fails over to OpenRouter immediately when Groq errors fast', async () => {
+    primeAuth('u1');
+    // Primary (Groq) dies instantly; fallback (OpenRouter) answers.
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('groq')) {
+        return jsonResponse({ error: { message: 'primary down' } }, 500);
+      }
+      return jsonResponse({ choices: [{ message: { content: 'from fallback' } }] });
     });
 
     const started = Date.now();

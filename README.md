@@ -4,7 +4,8 @@ Backend for **SAFESPACE** — an emotional support chat app with 12 AI personali
 
 - **Runtime:** Node.js >= 18 (uses native `fetch`), TypeScript (strict)
 - **Hosting:** Vercel serverless functions (`api/`) — the same handlers also run as an Express app (`src/index.ts`) for local/self-hosted use
-- **AI:** Qwen3-14B via OpenRouter (primary) → GPT-OSS-20B via Groq (fallback)
+- **AI:** GPT-OSS-20B via Groq (primary — fastest) → Qwen3-14B via OpenRouter (fallback).
+  Set `CHAT_PRIMARY_PROVIDER=openrouter` to restore the old order.
 - **Auth:** Firebase ID tokens (`Authorization: Bearer <idToken>`)
 - **Data:** Firestore (quotas, subscriptions, payments)
 - **Payments:** Razorpay orders + checkout verification + webhooks

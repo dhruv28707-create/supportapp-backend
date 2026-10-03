@@ -132,7 +132,11 @@ describe('diagnose gate', () => {
     process.env.PRIMARY_MODEL = 'custom/primary';
     const enabled = await request(app).get('/api/diagnose');
     expect(enabled.status).toBe(200);
-    expect(enabled.body.primaryModel).toBe('custom/primary');
+    // PRIMARY_MODEL is the legacy alias for the OpenRouter model, which is
+    // now the FALLBACK — Groq answers first.
+    expect(enabled.body.primaryProvider).toBe('groq');
+    expect(enabled.body.fallbackModel).toBe('custom/primary');
+    expect(enabled.body.primaryModel).toBe('openai/gpt-oss-20b');
   });
 });
 

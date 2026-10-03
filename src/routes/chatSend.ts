@@ -40,34 +40,70 @@ interface ModelTarget {
 }
 
 /**
+ * Groq (gpt-oss-20b). Chosen as the default PRIMARY because it is markedly
+ * faster to first token than OpenRouter's Qwen3-14B — the model the user is
+ * waiting on should be the quick one.
+ * `GROQ_MODEL` is the clear name; `FALLBACK_MODEL` is the legacy name kept so
+ * existing deployments keep working after the provider order was flipped.
+ */
+function groqTarget(): ModelTarget {
+  return {
+    name: 'groq',
+    baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
+    apiKey: process.env.GROQ_API_KEY || '',
+    model: process.env.GROQ_MODEL || process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b',
+    extraBody: { reasoning_effort: 'low' },
+  };
+}
+
+/**
+ * OpenRouter (Qwen3-14B). Slower but stronger — now the FALLBACK, so it only
+ * answers when Groq is down or hung.
+ * `OPENROUTER_MODEL` is the clear name; `PRIMARY_MODEL` is the legacy alias.
+ */
+function openRouterTarget(): ModelTarget {
+  return {
+    name: 'openrouter',
+    baseUrl: process.env.PRIMARY_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions',
+    apiKey: process.env.PRIMARY_API_KEY || process.env.OPENROUTER_API_KEY || '',
+    model: process.env.OPENROUTER_MODEL || process.env.PRIMARY_MODEL || 'qwen/qwen3-14b',
+    extraBody: { reasoning: { enabled: false } },
+  };
+}
+
+/**
+ * Which provider answers first. Defaults to Groq because response latency is
+ * dominated by the primary model's generation time, and gpt-oss-20b on Groq
+ * is far quicker than Qwen3-14B on OpenRouter. Set
+ * CHAT_PRIMARY_PROVIDER=openrouter to restore the old order.
+ */
+function primaryProvider(): 'groq' | 'openrouter' {
+  return (process.env.CHAT_PRIMARY_PROVIDER || '').toLowerCase() === 'openrouter'
+    ? 'openrouter'
+    : 'groq';
+}
+
+/**
  * Reads provider keys/targets lazily (per request) so tests can stub env vars
  * with vi.stubEnv AFTER the module was imported. Module-level
  * `process.env.X` captures would freeze the import-time value (usually
  * undefined in tests) and break every chat test with ai_key_missing.
  */
 function getModelTargets(): { PRIMARY: ModelTarget; FALLBACK: ModelTarget } {
-  const groqKey = process.env.GROQ_API_KEY || '';
-  const openRouterKey = process.env.OPENROUTER_API_KEY || '';
-  const PRIMARY: ModelTarget = {
-    name: 'primary',
-    baseUrl: process.env.PRIMARY_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions',
-    apiKey: process.env.PRIMARY_API_KEY || openRouterKey,
-    model: process.env.PRIMARY_MODEL || 'qwen/qwen3-14b',
-    extraBody: { reasoning: { enabled: false } },
-  };
-  const FALLBACK: ModelTarget = {
-    name: 'fallback',
-    baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
-    apiKey: groqKey,
-    model: process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b',
-    extraBody: { reasoning_effort: 'low' },
-  };
-  return { PRIMARY, FALLBACK };
+  const groq = groqTarget();
+  const openRouter = openRouterTarget();
+  return primaryProvider() === 'openrouter'
+    ? { PRIMARY: openRouter, FALLBACK: groq }
+    : { PRIMARY: groq, FALLBACK: openRouter };
 }
 // Both models are plain instruct models (no hidden reasoning tokens), so the
 // budget goes straight to the visible reply. The system prompt asks for
 // short, human-scale replies (mostly 1-3 sentences); 600 is a generous ceiling
 // that still caps runaway responses without mid-sentence truncation.
+//
+// Keep this tight-ish: generation time scales with tokens emitted, so a
+// runaway reply is also a slow reply. 600 is already ~10x a normal 1-3
+// sentence answer, which is plenty of headroom before truncation.
 const MAX_TOKENS = 600;
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -495,7 +531,9 @@ async function handleChatSend(
 
   // Resolves when the leading attempt has definitively failed. Later attempts
   // race their stagger against this so a fast failure fails over immediately.
-  let releaseFallback: () => void = () => {};
+  // The executor runs synchronously, so `releaseFallback` is assigned before
+  // anything can read it.
+  let releaseFallback: (() => void) | null = null;
   const fallbackReleased = new Promise<void>((resolve) => {
     releaseFallback = resolve;
   });
@@ -512,7 +550,7 @@ async function handleChatSend(
     // on a real failure, never on success (which would waste tokens).
     if (index === 0) {
       void attemptPromise.then((result) => {
-        if (attemptFailed(result)) releaseFallback();
+        if (attemptFailed(result)) releaseFallback?.();
       });
     }
     return attemptPromise;
