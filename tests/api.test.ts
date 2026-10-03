@@ -69,6 +69,30 @@ describe('Chat endpoints (the 404 regression)', () => {
     expect(mockDb.get('subscriptions/u1')).toBeUndefined();
   });
 
+  it('fails over to the fallback immediately when the primary errors fast', async () => {
+    primeAuth('u1');
+    // Primary (OpenRouter) dies instantly; fallback (Groq) answers.
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('groq')) {
+        return jsonResponse({ choices: [{ message: { content: 'from fallback' } }] });
+      }
+      return jsonResponse({ error: { message: 'primary down' } }, 500);
+    });
+
+    const started = Date.now();
+    const res = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'are you there', personality: 'Friend' });
+    const elapsed = Date.now() - started;
+
+    expect(res.status).toBe(200);
+    expect(res.body.reply).toBe('from fallback');
+    // The fallback must NOT wait out the full stagger when the primary has
+    // already definitively failed — that was 700ms of dead air per message.
+    expect(elapsed).toBeLessThan(700);
+  });
+
   it('rejects locked personas for free plans without touching quota or AI', async () => {
     primeAuth('u1');
     const res = await request(app)

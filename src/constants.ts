@@ -56,11 +56,20 @@ export class LimitReachedError extends Error {
   }
 }
 
-// Per-attempt timeout for upstream AI calls (chat + diagnose). Kept small so
-// a hung upstream call can't blow past Vercel's function duration limits,
-// but generous enough that slower routes (e.g. OpenRouter free-tier routing)
-// can still answer: worst case is 2 x 15s attempts = 30s of a 60s budget.
-export const AI_TIMEOUT_MS = 15000;
+// Per-attempt timeout for upstream AI calls (chat + diagnose).
+//
+// Latency budget: users read anything past ~10s as "it's stuck", and mobile
+// clients abort around 10s anyway, so a 15s attempt produced nothing at all
+// for a hung provider. At 9s a slow attempt is abandoned while the
+// staggered fallback still has room to answer inside the user's patience
+// window.
+export const AI_TIMEOUT_MS = 9000;
+
+// How long after the primary attempt the fallback is launched (see
+// chatSend.ts). Short enough that the fallback still answers in time when
+// the primary is hung; long enough that a merely slow-but-healthy
+// primary still wins, so we don't double-bill tokens on every request.
+export const CHAT_FALLBACK_STAGGER_MS = 700;
 
 // Prices in paise (₹1 = 100 paise). Single source of truth for order amounts.
 export const TIER_PRICES = {

@@ -4,6 +4,7 @@ import {
   PERSONALITIES,
   LimitReachedError,
   AI_TIMEOUT_MS,
+  CHAT_FALLBACK_STAGGER_MS,
   isPersonalityAllowed,
   PlanType,
 } from '../constants';
@@ -187,26 +188,53 @@ async function callModel(
   }
 }
 
-/** Never rejects — resolves { attempt, index } or null on failure. */
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Never rejects — resolves { attempt, target } or null on failure.
+ *
+ * `releaseEarly` lets a queued attempt skip the rest of its delay the moment
+ * an earlier attempt has DEFINITIVELY failed (network error, HTTP error, or
+ * empty body). That removes the pointless dead time where a dead primary
+ * errors in 200ms but the fallback still sat waiting for the full stagger.
+ * A slow-but-healthy primary deliberately does NOT release the fallback —
+ * that would double-bill tokens on every merely-sluggish request.
+ */
 function startAttempt(
   target: ModelTarget,
   messages: { role: string; content: string }[],
   delayMs: number,
-  clientGoneSignal?: AbortSignal
+  clientGoneSignal?: AbortSignal,
+  releaseEarly?: Promise<void>
 ): Promise<{ attempt: GroqAttempt; target: ModelTarget } | null> {
   const run = async (): Promise<{ attempt: GroqAttempt; target: ModelTarget } | null> => {
     const attempt = await callModel(target, messages, clientGoneSignal);
     recordModelResult(target.name, attempt.ok && !!attempt.reply);
     return { attempt, target };
   };
-  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-  const wrapped: Promise<{ attempt: GroqAttempt; target: ModelTarget } | null> =
-    delayMs > 0 ? delay(delayMs).then(() => run()) : run();
+  let wait: Promise<void>;
+  if (delayMs <= 0) {
+    wait = Promise.resolve();
+  } else if (releaseEarly) {
+    wait = Promise.race([delay(delayMs), releaseEarly]);
+  } else {
+    wait = delay(delayMs);
+  }
+  const wrapped: Promise<{ attempt: GroqAttempt; target: ModelTarget } | null> = wait.then(() =>
+    run()
+  );
   // Absolute guarantee against unhandled rejections: attempts never reject.
   return wrapped.catch((error: unknown) => {
     console.error(`[chat] Attempt machinery error (${target.name}):`, error);
     return null;
   });
+}
+
+/** True when an attempt produced no usable reply (error, timeout, empty body). */
+function attemptFailed(result: { attempt: GroqAttempt } | null): boolean {
+  return !result || !result.attempt.ok || !result.attempt.reply;
 }
 
 /**
@@ -442,30 +470,63 @@ async function handleChatSend(
   ];
 
   // --- Race primary and fallback STAGGERED IN PARALLEL ---
-  // First success wins: the fallback starts STAGGER_MS after the primary, so a
-  // slow-but-healthy primary can still win, but a HUNG primary never blocks
-  // a fast fallback (the old sequential `for await` waited out the full
-  // AI_TIMEOUT_MS on primary even when fallback had already succeeded —
-  // mobile clients abort ~10s and saw "AI not responding").
-  // STAGGER is 1500ms (not 300ms): a short stagger fired the fallback on
-  // EVERY slow request and double-billed tokens; 1500ms means the fallback
-  // only fires when the primary is genuinely hung.
+  // First success wins: the fallback starts CHAT_FALLBACK_STAGGER_MS after the
+  // primary, so a slow-but-healthy primary can still win, but a HUNG primary
+  // never blocks a fast fallback (the old sequential `for await` waited out
+  // the full AI_TIMEOUT_MS on primary even when fallback had already
+  // succeeded — mobile clients abort ~10s and saw "AI not responding").
+  //
+  // The stagger is small (700ms, not the old 1500ms) so the fallback still
+  // lands inside the user's patience window; it is not near-zero because
+  // firing the fallback on EVERY request would double-bill tokens when the
+  // primary is merely a little slow.
+  //
+  // And when the primary fails FAST (bad key, 5xx, network error) the
+  // fallback doesn't wait out the stagger at all — it is released the moment
+  // the primary settles without a reply, so a dead primary costs the user
+  // only the provider's error time, not 700ms of dead air on top of it.
   const targetsToTry = PRIMARY.model === FALLBACK.model ? [PRIMARY] : [PRIMARY, FALLBACK];
-  const STAGGER_MS = 1500;
 
   const candidates = targetsToTry.filter((t) => t.apiKey && !isModelSkipped(t.name));
   // If every candidate is breaker-open, still try (half-open probes resolve
   // this naturally on the next cooldown expiry, but never return 503 without
   // at least one real attempt).
-  const attempts = (candidates.length > 0 ? candidates : targetsToTry.filter((t) => t.apiKey)).map(
-    (target, index) => startAttempt(target, messages, index * STAGGER_MS, clientGoneSignal)
-  );
+  const queued = candidates.length > 0 ? candidates : targetsToTry.filter((t) => t.apiKey);
+
+  // Resolves when the leading attempt has definitively failed. Later attempts
+  // race their stagger against this so a fast failure fails over immediately.
+  let releaseFallback: () => void = () => {};
+  const fallbackReleased = new Promise<void>((resolve) => {
+    releaseFallback = resolve;
+  });
+
+  const attempts = queued.map((target, index) => {
+    const attemptPromise = startAttempt(
+      target,
+      messages,
+      index * CHAT_FALLBACK_STAGGER_MS,
+      clientGoneSignal,
+      index === 0 ? undefined : fallbackReleased
+    );
+    // The first attempt is the one that gates the fallback: release it only
+    // on a real failure, never on success (which would waste tokens).
+    if (index === 0) {
+      void attemptPromise.then((result) => {
+        if (attemptFailed(result)) releaseFallback();
+      });
+    }
+    return attemptPromise;
+  });
 
   let reply = '';
   let usedTarget: ModelTarget | null = null;
   if (attempts.length > 0 && !clientGoneSignal.aborted) {
     type AttemptResult = { attempt: GroqAttempt; target: ModelTarget } | null;
-    const deadlineMs = AI_TIMEOUT_MS + STAGGER_MS * attempts.length + 2000;
+    // Worst case: the last attempt starts at (n-1) x stagger and may itself
+    // run the full timeout. Keep this equal to the real abort point — a
+    // tighter deadline only risks 503-ing an attempt that was about to
+    // succeed, so lower AI_TIMEOUT_MS itself when latency must drop.
+    const deadlineMs = AI_TIMEOUT_MS + CHAT_FALLBACK_STAGGER_MS * (attempts.length - 1) + 500;
     const firstSuccess = new Promise<AttemptResult>((resolve) => {
       let settledFailures = 0;
       attempts.forEach((p) => {
