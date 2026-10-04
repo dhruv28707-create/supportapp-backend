@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
   "framework": null,
-  "buildCommand": "echo \"no build needed - serverless api functions\"",
+  "buildCommand": "npm run typecheck",
   "outputDirectory": "public",
   "functions": {
     "api/**/*.ts": {

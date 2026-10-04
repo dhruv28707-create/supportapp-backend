@@ -75,7 +75,7 @@ export const CHAT_FALLBACK_STAGGER_MS = 500;
 export const TIER_PRICES = {
   pro_monthly: 17900, // ₹179
   pro_yearly: 69900, // ₹699
-  ultimate_monthly: 1000, // ₹199
+  ultimate_monthly: 19900, // ₹199
   ultimate_yearly: 79900, // ₹799
 } as const;
 
@@ -91,6 +91,43 @@ const TIER_TO_PLAN: Record<Tier, PlanType> = {
 /** Maps a Razorpay checkout tier to an app plan, or null if unknown. */
 export function tierToPlan(tier: string): PlanType | null {
   return (TIER_TO_PLAN as Record<string, PlanType | undefined>)[tier] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Quota refill visibility (UX gate, not a quota-accounting change)
+//
+// Complaint: the refill countdown started from the very first message, so a
+// user opening the app or sending 1 message immediately saw "refills in Xh".
+// Rule now: the refill timer is only SURFACED once >= 75% of the plan quota
+// is used (or the limit is reached). Below that the backend still reports
+// quota counts, but sets showRefillTimer=false so clients hide the countdown.
+// Where to show it is a frontend decision — lobby/chat must ignore the timer,
+// Settings may show it when showRefillTimer is true. The quota window itself
+// still rolls on lastResetAt; this only gates visibility.
+// ---------------------------------------------------------------------------
+
+/** Fraction of quota used at/above which the refill countdown is surfaced. */
+export const QUOTA_REFILL_VISIBILITY_THRESHOLD = 0.75;
+
+/** 0..1 fraction of the plan quota consumed (clamped). */
+export function getQuotaUsageFraction(messageCount: number, limit: number): number {
+  if (limit <= 0) return 0;
+  const used = Math.max(0, messageCount);
+  return Math.min(1, used / limit);
+}
+
+/**
+ * Whether the client should surface the refill countdown at all.
+ * True when the limit is reached or usage >= 75%. Below that, lobby/chat
+ * must stay clean and even Settings should not show a countdown.
+ */
+export function shouldShowRefillTimer(
+  messageCount: number,
+  limit: number,
+  isLimitReached = messageCount >= limit
+): boolean {
+  if (isLimitReached) return true;
+  return getQuotaUsageFraction(messageCount, limit) >= QUOTA_REFILL_VISIBILITY_THRESHOLD;
 }
 
 // ---------------------------------------------------------------------------

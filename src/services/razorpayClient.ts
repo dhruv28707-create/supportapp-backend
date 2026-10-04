@@ -49,7 +49,8 @@ export const razorpay: Razorpay = new Proxy({} as Razorpay, {
     const instance = real() as unknown as Record<string | symbol, unknown>;
     const value = instance[prop as string];
     if (typeof value === 'object' && value !== null) return value;
-    if (typeof value === 'function') return (value as Function).bind(instance);
+    if (typeof value === 'function')
+      return (value as (...args: unknown[]) => unknown).bind(instance);
     return Reflect.get(instance, prop, receiver);
   },
 });

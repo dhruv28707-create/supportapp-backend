@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { resetAll, mockDb, primeAuth, authHeader } from './setup';
 
 const { consumeRateLimit, RateLimitExceededError } = await import('../src/services/rateLimitService');
-const { consumeMessage, getPlanState, invalidatePlanCache } = await import(
+const { consumeMessage, getPlanState } = await import(
   '../src/services/messageService'
 );
 const { enforceChatIpThrottle, CHAT_IP_RATE_LIMIT_MAX } = await import(
@@ -102,8 +102,6 @@ describe('plan reads are always fresh (no stale cache)', () => {
     const fresh = await getPlanState('u1');
     expect(fresh.plan).toBe('pro');
 
-    // invalidatePlanCache is a no-op kept for callers.
-    invalidatePlanCache('u1');
     const stillFresh = await getPlanState('u1');
     expect(stillFresh.plan).toBe('pro');
   });

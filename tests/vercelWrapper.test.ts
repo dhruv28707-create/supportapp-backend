@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { describe, it, expect, beforeEach } from 'vitest';
+import type { Response } from 'express';
 import { primeAuth, resetAll, mockFetch, jsonResponse } from './setup';
 
 const { protectedEndpoint } = await import('../src/apiWrapper');
@@ -61,7 +62,7 @@ describe('Vercel protectedEndpoint wrapper', () => {
     const req = makeReq();
     const res = new FakeResponse();
 
-    await handler(req, res);
+    await handler(req, res as unknown as Response);
 
     // The serverless runtime considers the invocation done when this promise
     // resolves. If the response is not written yet, the response is lost —
@@ -76,7 +77,7 @@ describe('Vercel protectedEndpoint wrapper', () => {
     (req as { headers: Record<string, string> }).headers.authorization = '';
     const res = new FakeResponse();
 
-    await handler(req, res);
+    await handler(req, res as unknown as Response);
 
     expect(res.statusCode).toBe(401);
   });

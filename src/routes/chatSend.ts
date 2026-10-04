@@ -8,6 +8,7 @@ import {
   PLAN_CONFIG,
   isPersonalityAllowed,
   PlanType,
+  getQuotaUsageFraction,
 } from '../constants';
 import { buildSystemPrompt, RELIGION_KEYS } from '../services/promptService';
 import {
@@ -25,8 +26,8 @@ import {
 } from '../services/appCheckService';
 import {
   enforceChatIpThrottle,
-  CHAT_IP_RATE_LIMIT_MAX,
-  CHAT_IP_RATE_LIMIT_WINDOW_MS,
+  getChatIpRateLimitMax,
+  getChatIpRateLimitWindowMs,
 } from '../services/chatClientThrottle';
 
 // Abuse backstop on top of the plan quota: a stolen ID token or a scripted
@@ -322,7 +323,7 @@ async function streamAttempt(
     }
     let response: globalThis.Response;
     try {
-      response = (await fetch(target.baseUrl, {
+      response = await fetch(target.baseUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -337,7 +338,7 @@ async function streamAttempt(
           ...(target.extraBody || {}),
         }),
         signal: controller.signal,
-      })) as unknown as globalThis.Response;
+      });
     } catch (error: unknown) {
       return { ok: false, status: undefined, errorData: error };
     }
@@ -580,7 +581,7 @@ async function handleChatSend(
   const tPlan = Date.now();
   if (!isPersonalityAllowed(plan, personality)) {
     sendJson(res, 403, {
-      error: `The ${personality} personality requires a Pro plan. Upgrade to unlock it.`,
+      error: `The ${personality} personality requires a paid plan. Upgrade to unlock it.`,
       code: 'persona_locked',
       plan,
       personality,
@@ -608,6 +609,11 @@ async function handleChatSend(
     sendJson(res, 429, {
       limitReached: true,
       nextRefreshAt: planState.lastResetAt + quotaConfig.refreshMs,
+      // Quota exhausted: refill countdown is always surfaced (100% used).
+      showRefillTimer: true,
+      messagesUsed: Math.max(0, planState.messageCount),
+      messagesTotal: quotaConfig.limit,
+      quotaPercent: getQuotaUsageFraction(planState.messageCount, quotaConfig.limit),
     });
     return;
   }
@@ -625,7 +631,7 @@ async function handleChatSend(
       appCheckEnabled ? verifyAppCheckToken(req) : 'skipped')().catch(
       (error: unknown) => ({ __error: error }) as unknown as AppCheckResult
     ),
-    (async (): Promise<'ok' | RateLimitExceededError | unknown> => {
+    (async (): Promise<unknown> => {
       if (!throttleIp) return 'ok';
       try {
         await enforceChatIpThrottle(throttleIp);
@@ -634,7 +640,7 @@ async function handleChatSend(
         return error;
       }
     })(),
-    (async (): Promise<'ok' | RateLimitExceededError | unknown> => {
+    (async (): Promise<unknown> => {
       try {
         await consumeRateLimit(`chat:${uid}`, CHAT_RATE_LIMIT_MAX, CHAT_RATE_LIMIT_WINDOW_MS);
         return 'ok';
@@ -666,7 +672,7 @@ async function handleChatSend(
       return;
     } else if (appCheckResult === 'missing') {
       console.warn(
-        `[chat uid=${uid.slice(0, 8)}] App Check enabled but no token; applying IP throttle (${CHAT_IP_RATE_LIMIT_MAX}/${CHAT_IP_RATE_LIMIT_WINDOW_MS / 60000}min)`
+        `[chat uid=${uid.slice(0, 8)}] App Check enabled but no token; applying IP throttle (${getChatIpRateLimitMax()}/${getChatIpRateLimitWindowMs() / 60000}min)`
       );
     }
   }
@@ -680,6 +686,8 @@ async function handleChatSend(
       error: 'Too many requests, try again later',
       code: 'ip_rate_limited',
       nextRefreshAt: Date.now() + ipThrottleResult.retryAfterMs,
+      // Abuse throttle, not quota exhaustion: never show the quota refill UI.
+      showRefillTimer: false,
     });
     return;
   }
@@ -696,6 +704,8 @@ async function handleChatSend(
       limitReached: true,
       error: 'Too many requests, try again later',
       nextRefreshAt: Date.now() + abuseLimitResult.retryAfterMs,
+      // Abuse throttle, not quota exhaustion: never show the quota refill UI.
+      showRefillTimer: false,
     });
     return;
   }
@@ -794,8 +804,8 @@ async function handleChatSend(
     const firstSuccess = new Promise<AttemptResult>((resolve) => {
       let settledFailures = 0;
       attempts.forEach((p) => {
-        p.then((result) => {
-          if (result && result.attempt.ok && result.attempt.reply) {
+        void p.then((result) => {
+          if (result?.attempt.ok && result.attempt.reply) {
             resolve(result);
           } else {
             settledFailures += 1;
@@ -806,7 +816,7 @@ async function handleChatSend(
     });
     const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), deadlineMs));
     const winner = await Promise.race([firstSuccess, timeout]);
-    if (winner && winner.attempt.reply) {
+    if (winner?.attempt.reply) {
       reply = winner.attempt.reply;
       usedTarget = winner.target;
     }
@@ -973,7 +983,7 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
   let winner: ModelTarget | null = null;
   let fullReply = '';
   let firstTokenAt = 0;
-  let resolveFirstToken: () => void = () => {};
+  let resolveFirstToken: () => void = () => undefined;
   const firstTokenPromise = new Promise<void>((resolve) => {
     resolveFirstToken = resolve;
   });
@@ -1070,9 +1080,6 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
 
     // Breaker bookkeeping with race context: the winner counts as success;
     // a started-but-tokenless loser aborted BY THE RACE is not a failure.
-    // (winner is assigned only inside stream callbacks, so copy to a const
-    // (winner is assigned only inside stream callbacks, so read it through
-    // a cast — narrowing would otherwise collapse it to null/never.)
     const won = winner as ModelTarget | null;
     if (!fullReply || won === null) {
       console.error(

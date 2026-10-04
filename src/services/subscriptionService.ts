@@ -149,19 +149,6 @@ export async function grantPlanAndMarkPaid(
 
     return effectivePlan;
   });
-
-  // Keep the plan cache coherent (lazy require avoids a
-  // messageService <-> subscriptionService import cycle).
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { invalidatePlanCache } = require('./messageService') as {
-      invalidatePlanCache: (uid: string) => void;
-    };
-    invalidatePlanCache(uid);
-  } catch {
-    // Cache invalidation is best-effort.
-  }
-
   return grantedPlan;
 }
 
@@ -210,16 +197,6 @@ export async function cancelUserSubscription(uid: string): Promise<boolean> {
     },
     { merge: true }
   );
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { invalidatePlanCache } = require('./messageService') as {
-      invalidatePlanCache: (uid: string) => void;
-    };
-    invalidatePlanCache(uid);
-  } catch {
-    // best-effort only
-  }
 
   return true;
 }
@@ -299,7 +276,6 @@ export async function startUltimateTrial(uid: string): Promise<TrialGrant> {
     return { plan: TRIAL_PLAN, startedAt: now, expiresAt };
   });
 
-  // No cache invalidation needed: plan reads are uncached (invalidatePlanCache
-  // is a no-op), so the new trial is visible immediately everywhere.
+  // Plan reads are uncached, so the new trial is visible immediately everywhere.
   return granted;
 }

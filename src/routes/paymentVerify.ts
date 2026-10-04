@@ -65,7 +65,7 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
 
   // Payment signature: HMAC-SHA256(key_secret, `${order_id}|${payment_id}`).
   // Read lazily so tests can stub the env var after import.
-  const keySecret = process.env.RAZORPAY_KEY_SECRET as string;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET ?? '';
   const expectedHex = crypto
     .createHmac('sha256', keySecret)
     .update(`${razorpay_order_id}|${razorpay_payment_id}`)

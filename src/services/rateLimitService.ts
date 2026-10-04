@@ -105,10 +105,15 @@ export async function consumeRateLimit(
     return { count: count + 1, windowStart };
   } catch (error) {
     if (error instanceof RateLimitExceededError) throw error;
-    // Fail-open: the limiter is a secondary defense — real security comes
-    // from auth + payment verification — and a limiter hiccup must never
-    // take the API down.
-    console.error('Rate limiter error (allowing request):', error);
+    // Fail-open by default: the limiter is a secondary defense — real security
+    // comes from auth + payment verification — and a limiter hiccup must never
+    // take the API down. Set RATE_LIMIT_FAIL_CLOSED=true to deny instead
+    // (useful if AI spend must be capped even during a Firestore outage).
+    // The distinctive prefix lets log alerts fire on fail-open events.
+    console.error('[fail-open] Rate limiter error (allowing request):', error);
+    if (process.env.RATE_LIMIT_FAIL_CLOSED === 'true') {
+      throw new RateLimitExceededError(windowMs);
+    }
     return { count: 0, windowStart: 0 };
   }
 }

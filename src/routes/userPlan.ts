@@ -1,6 +1,12 @@
 import { Response } from 'express';
 import { checkAndResetOnly } from '../services/messageService';
-import { PLAN_CONFIG, DEFAULT_PLAN, getTrialEligibilityWindowDays } from '../constants';
+import {
+  PLAN_CONFIG,
+  DEFAULT_PLAN,
+  getTrialEligibilityWindowDays,
+  getQuotaUsageFraction,
+  shouldShowRefillTimer,
+} from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { auth } from '../config/firebaseAdmin';
 
@@ -18,6 +24,14 @@ export async function getUserPlanHandler(req: AuthenticatedRequest, res: Respons
     const messagesRemaining = Math.max(0, limit - messageCount);
     const nextRefreshAt = lastResetAt + refreshMs;
     const isLimitReached = messageCount >= limit;
+
+    // Refill UX gate: the countdown must NOT appear from the first message.
+    // Below 75% usage the timer stays hidden (lobby/chat stay clean); only
+    // Settings may show it, and only when showRefillTimer is true.
+    // nextRefreshAt is still returned for backward compat — clients must
+    // ignore it unless showRefillTimer is true.
+    const quotaPercent = getQuotaUsageFraction(messageCount, limit);
+    const showRefillTimer = shouldShowRefillTimer(messageCount, limit, isLimitReached);
 
     // Offer the free-trial CTA only to a free account that has never trialed
     // and is still "new". The account-age check costs one Auth call, so it is
@@ -38,12 +52,18 @@ export async function getUserPlanHandler(req: AuthenticatedRequest, res: Respons
     res.json({
       plan,
       messagesRemaining,
+      // Back-compat: always a number. New clients must gate on showRefillTimer.
       nextRefreshAt,
       isLimitReached,
       isTrial,
       trialEndsAt,
       trialUsed,
       trialAvailable,
+      // New quota-UX fields for the 75% refill rule:
+      messagesUsed: Math.max(0, messageCount),
+      messagesTotal: limit,
+      quotaPercent,
+      showRefillTimer,
     });
   } catch (error) {
     console.error('User plan error:', error);

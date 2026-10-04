@@ -69,7 +69,17 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
   // Live Razorpay self-test: ?rzp=1 attempts to create a minimal ₹1 order
   // with the deployed keys and reports the exact outcome (or upstream error).
   // Never exposes the keys themselves. The order is never paid and expires.
+  //
+  // Gated: unauthenticated callers could otherwise mint unlimited ₹1 orders
+  // against the live key. Requires DIAGNOSE_ADMIN_TOKEN to be configured and
+  // the caller to send it as x-diagnose-token. No token configured → denied.
   if (req.query.rzp === '1') {
+    const adminToken = process.env.DIAGNOSE_ADMIN_TOKEN || '';
+    const provided = String(req.headers['x-diagnose-token'] || '');
+    if (!adminToken || provided !== adminToken) {
+      res.status(403).json({ ...base, rzpTest: { ok: false, error: 'Forbidden' } });
+      return;
+    }
     if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
       res.json({ ...base, rzpTest: { ok: false, error: 'RAZORPAY keys are not set' } });
       return;
@@ -124,7 +134,7 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: fallbackModel,
+        model: groqModel,
         messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
         // Enough for a short diagnostic reply; a healthy result should show
         // reply != null.

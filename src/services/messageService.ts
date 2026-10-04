@@ -47,9 +47,11 @@ function normalizeState(data: Record<string, unknown>): SubscriptionState {
     ? (planRaw as PlanType)
     : DEFAULT_PLAN;
 
+  const rawCount = typeof data.messageCount === 'number' ? data.messageCount : 0;
+
   return {
     plan,
-    messageCount: typeof data.messageCount === 'number' ? data.messageCount : 0,
+    messageCount: Math.max(0, Math.floor(rawCount)),
     lastResetAt: typeof data.lastResetAt === 'number' ? data.lastResetAt : 0,
     expiresAt: toEpochMs(data.expiresAt),
     isTrial: data.isTrial === true,
@@ -125,19 +127,10 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
 }
 
 // ---------------------------------------------------------------------------
-// Plan-state reads are always fresh (no in-memory cache).
-//
-// The old 15s TTL cache was per-instance memory: on serverless every instance
-// held a different view, so a grant/cancel/expiry on instance A was invisible
-// to instance B for up to 15s — a newly-upgraded user could be denied premium
-// personas (or an expired user allowed them). Firestore reads are cheap
-// (~1 read per chat/plan call) and always coherent, so the cache was removed.
-// invalidatePlanCache is kept as a no-op for callers.
+// Plan-state reads are always fresh (no in-memory cache). Firestore reads are
+// cheap (~1 read per chat/plan call) and always coherent across serverless
+// instances, so no cache layer exists by design.
 // ---------------------------------------------------------------------------
-
-export function invalidatePlanCache(_uid: string): void {
-  // No-op: reads are uncached, so there is nothing to invalidate.
-}
 
 /**
  * Effective plan (expiry applied, window refreshed in the returned numbers)
@@ -187,9 +180,8 @@ export async function getPlanState(uid: string): Promise<UserMessageState> {
 export async function consumeMessage(uid: string): Promise<{ success: true }> {
   const now = Date.now();
 
-  // Load fresh state (bypass the TTL cache): the cache may hold a stale plan
-  // right after a grant/cancel, and getPlanState's window-refresh would mask
-  // whether the stored window actually rolled over.
+  // Load fresh state: getPlanState's window-refresh would mask whether the
+  // stored window actually rolled over.
   const raw = await loadSubscriptionState(uid);
   const state = applyExpiry(raw, now);
   const downgraded = state.plan !== raw.plan || state.expiresAt !== raw.expiresAt;
@@ -209,41 +201,37 @@ export async function consumeMessage(uid: string): Promise<{ success: true }> {
 
   const needsResetWrite = windowExpired || downgraded;
 
-  try {
-    if (needsResetWrite) {
-      // Persist the reset (and any expiry downgrade) with an explicit count
-      // of 1: FieldValue.increment(1) would keep growing from the stale
-      // stored value (e.g. 20 -> 21) instead of resetting to 1.
-      const fields: Record<string, unknown> = {
-        plan: state.plan,
-        expiresAt: state.expiresAt,
-        messageCount: 1,
-        lastResetAt: effectiveReset,
-        updatedAt: now,
-        // `state` is post-applyExpiry: an expired trial is already cleared
-        // here (isTrial false / trialEndsAt null) while trialUsed persists.
-        isTrial: state.isTrial,
-        trialEndsAt: state.trialEndsAt,
-      };
-      await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
-    } else {
-      const fields: Record<string, unknown> = {
-        plan: state.plan,
-        messageCount: FieldValue.increment(1),
-        updatedAt: now,
-      };
-      if (state.plan === DEFAULT_PLAN) {
-        // Free plan (including a just-applied expiry downgrade): clear any
-        // stale expiry/trial fields so downstream reads see a consistent doc.
-        fields.expiresAt = null;
-        fields.isTrial = false;
-        fields.trialEndsAt = null;
-      }
-
-      await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
+  if (needsResetWrite) {
+    // Persist the reset (and any expiry downgrade) with an explicit count
+    // of 1: FieldValue.increment(1) would keep growing from the stale
+    // stored value (e.g. 20 -> 21) instead of resetting to 1.
+    const fields: Record<string, unknown> = {
+      plan: state.plan,
+      expiresAt: state.expiresAt,
+      messageCount: 1,
+      lastResetAt: effectiveReset,
+      updatedAt: now,
+      // `state` is post-applyExpiry: an expired trial is already cleared
+      // here (isTrial false / trialEndsAt null) while trialUsed persists.
+      isTrial: state.isTrial,
+      trialEndsAt: state.trialEndsAt,
+    };
+    await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
+  } else {
+    const fields: Record<string, unknown> = {
+      plan: state.plan,
+      messageCount: FieldValue.increment(1),
+      updatedAt: now,
+    };
+    if (state.plan === DEFAULT_PLAN) {
+      // Free plan (including a just-applied expiry downgrade): clear any
+      // stale expiry/trial fields so downstream reads see a consistent doc.
+      fields.expiresAt = null;
+      fields.isTrial = false;
+      fields.trialEndsAt = null;
     }
-  } finally {
-    invalidatePlanCache(uid);
+
+    await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
   }
 
   return { success: true };
@@ -283,7 +271,6 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
           },
           { merge: true }
         );
-      invalidatePlanCache(uid);
     } catch (error) {
       console.error(`[quota] Window reset write failed uid=${uid.slice(0, 8)}:`, error);
     }
@@ -308,7 +295,6 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
           },
           { merge: true }
         );
-      invalidatePlanCache(uid);
     } catch (error) {
       console.error(`[quota] Expiry downgrade write failed uid=${uid.slice(0, 8)}:`, error);
     }
