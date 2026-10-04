@@ -50,9 +50,11 @@ describe('Chat endpoints (the 404 regression)', () => {
     expect(res.status).toBe(200);
     expect(res.body.reply).toBe('hey');
     expect(res.body.choices[0].message.content).toBe('hey');
-    // Quota consumed exactly once.
-    const sub = mockDb.get('subscriptions/u1');
-    expect(sub?.messageCount).toBe(1);
+    // Quota is accounted in the background after the reply is sent (so the
+    // reply never waits on Firestore) — poll until the write lands.
+    await vi.waitFor(() => {
+      expect(mockDb.get('subscriptions/u1')?.messageCount).toBe(1);
+    });
   });
 
   it('consumes NO quota when the AI upstream fails (503)', async () => {
@@ -67,6 +69,27 @@ describe('Chat endpoints (the 404 regression)', () => {
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('ai_upstream_error');
     expect(mockDb.get('subscriptions/u1')).toBeUndefined();
+  });
+
+  it('rejects an exhausted quota instantly without calling AI', async () => {
+    primeAuth('u1');
+    mockDb.collection('subscriptions').doc('u1').set({
+      plan: 'free',
+      messageCount: 20,
+      lastResetAt: Date.now(),
+      expiresAt: null,
+    }, { merge: false });
+
+    const res = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'hello', personality: 'Friend' });
+
+    expect(res.status).toBe(429);
+    expect(res.body.limitReached).toBe(true);
+    expect(typeof res.body.nextRefreshAt).toBe('number');
+    // No provider spend for a rejection.
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('answers from Groq first (fast provider is primary) and keeps OpenRouter as fallback', async () => {

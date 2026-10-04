@@ -8,5 +8,8 @@
     "api/**/*.ts": {
       "maxDuration": 60
     }
+  },
+  "env": {
+    "NODE_OPTIONS": "--no-deprecation"
   }
 }

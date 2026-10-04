@@ -5,11 +5,16 @@ import {
   LimitReachedError,
   AI_TIMEOUT_MS,
   CHAT_FALLBACK_STAGGER_MS,
+  PLAN_CONFIG,
   isPersonalityAllowed,
   PlanType,
 } from '../constants';
 import { buildSystemPrompt, RELIGION_KEYS } from '../services/promptService';
-import { consumeMessage, getPlanState } from '../services/messageService';
+import {
+  consumeMessage,
+  getPlanState,
+  UserMessageState,
+} from '../services/messageService';
 import { consumeRateLimit, RateLimitExceededError } from '../services/rateLimitService';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { extractClientIp } from '../utils/request';
@@ -563,14 +568,15 @@ async function handleChatSend(
   // next "why is it slow" question is answered by data (Firestore vs
   // provider vs network) instead of guesses.
   const t0 = Date.now();
-  let plan: PlanType;
+  let planState: UserMessageState;
   try {
-    plan = (await getPlanState(uid)).plan;
+    planState = await getPlanState(uid);
   } catch (error) {
     console.error(`[chat uid=${uid}] Plan lookup failed:`, error);
     sendJson(res, 500, { error: 'Internal server error' });
     return;
   }
+  const plan: PlanType = planState.plan;
   const tPlan = Date.now();
   if (!isPersonalityAllowed(plan, personality)) {
     sendJson(res, 403, {
@@ -587,6 +593,22 @@ async function handleChatSend(
   if (!PRIMARY.apiKey && !FALLBACK.apiKey) {
     console.error(`[chat uid=${uid}] Missing OPENROUTER_API_KEY and GROQ_API_KEY env vars`);
     sendJson(res, 503, { error: 'AI service unavailable', code: 'ai_key_missing' });
+    return;
+  }
+
+  // --- Quota gate (fail fast BEFORE spending AI money) ---
+  // getPlanState already returned the window-adjusted count, so enforce the
+  // limit here for an instant 429. The old flow generated a full AI reply
+  // and THEN 429-ed in consumeMessage — burning provider tokens and making
+  // an exhausted user wait seconds for a rejection. Same numbers, same
+  // shape ({ limitReached, nextRefreshAt }), just enforced up front; the
+  // post-reply consume below is then pure accounting.
+  const quotaConfig = PLAN_CONFIG[planState.plan];
+  if (planState.messageCount >= quotaConfig.limit) {
+    sendJson(res, 429, {
+      limitReached: true,
+      nextRefreshAt: planState.lastResetAt + quotaConfig.refreshMs,
+    });
     return;
   }
 
@@ -832,22 +854,6 @@ async function handleChatSend(
     );
   }
 
-  // AI responded successfully — only now consume a message from the quota.
-  try {
-    await consumeMessage(uid);
-  } catch (error) {
-    if (error instanceof LimitReachedError) {
-      sendJson(res, 429, {
-        limitReached: true,
-        nextRefreshAt: error.nextRefreshAt,
-      });
-      return;
-    }
-    console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
-    sendJson(res, 500, { error: 'Internal server error' });
-    return;
-  }
-
   sendJson(res, 200, {
     reply,
     // Echo back the effective persona so clients can confirm what was used.
@@ -857,6 +863,21 @@ async function handleChatSend(
     // (data.choices[0].message.content) instead of data.reply — return both
     // so old and new app versions both work.
     choices: [{ message: { role: 'assistant' as const, content: reply } }],
+  });
+
+  // AI responded successfully — account for it WITHOUT blocking the reply.
+  // Previously this awaited consumeMessage (a fresh 1-3 sequential Firestore
+  // round-trips AFTER the AI had already answered): ~1s+ of dead wait on a
+  // ready reply in prod. The limit itself was already enforced by the pre-AI
+  // quota gate above, so this write is pure accounting — fire and forget.
+  // A racing request can overshoot the quota by one message at most (the same
+  // accepted trade-off as the limiter's non-transactional increments).
+  void consumeMessage(uid).catch((error: unknown) => {
+    if (error instanceof LimitReachedError) {
+      console.warn(`[chat uid=${uid}] Quota filled during generation (reply already sent)`);
+      return;
+    }
+    console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
   });
 }
 
@@ -1075,20 +1096,15 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
         `ttft=${ttft}ms total=${tAi - ctx.t0}ms`
     );
 
-    // Only now consume quota — a failed stream never burns the allowance.
-    try {
-      await consumeMessage(uid);
-    } catch (error) {
+    // Quota was already enforced by the pre-AI gate — this write is pure
+    // accounting and rides in the background so it never delays the stream.
+    void consumeMessage(uid).catch((error: unknown) => {
       if (error instanceof LimitReachedError) {
-        sendEvent({ error: 'Message limit reached', code: 'limit_reached', limitReached: true });
-        endStream();
+        console.warn(`[chat uid=${uid}] Quota filled during generation (stream already sent)`);
         return;
       }
       console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
-      sendEvent({ error: 'Internal server error', code: 'quota_error' });
-      endStream();
-      return;
-    }
+    });
 
     sendEvent({
       done: true,

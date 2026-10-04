@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { primeAuth, resetAll, mockDb, mockFetch, jsonResponse } from './setup';
 
 // Imported after the setup file has installed the firebase-admin / fetch mocks.
@@ -60,8 +60,10 @@ describe('chatSendHandler disconnect detection', () => {
 
     expect(res.statusCode).toBe(200);
     expect((res.payload as { reply?: string }).reply).toBe('hey');
-    // Quota consumed exactly once, like a normal successful reply.
-    expect(mockDb.get('subscriptions/u1')?.messageCount).toBe(1);
+    // Quota is accounted in the background after the reply — poll for it.
+    await vi.waitFor(() => {
+      expect(mockDb.get('subscriptions/u1')?.messageCount).toBe(1);
+    });
   });
 
   it('does not abort on the response close that follows a written response', async () => {

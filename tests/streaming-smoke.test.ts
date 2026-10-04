@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
-import { primeAuth, authHeader, resetAll, mockFetch } from './setup';
+import { primeAuth, authHeader, resetAll, mockFetch, mockDb } from './setup';
 
 const { createApp } = await import('../src/app');
 const app = createApp();
@@ -44,6 +44,10 @@ describe('streaming smoke', () => {
     expect(res.text).toContain('"done":true');
     expect(res.text).toContain('hello');
     expect(res.text).toContain('[DONE]');
+    // Quota accounting rides in the background after the stream ends.
+    await vi.waitFor(() => {
+      expect(mockDb.get('subscriptions/u1')?.messageCount).toBe(1);
+    });
   });
 
   it('sends error event when all providers fail', async () => {
