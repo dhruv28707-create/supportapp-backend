@@ -69,7 +69,7 @@ export const AI_TIMEOUT_MS = 9000;
 // chatSend.ts). Short enough that the fallback still answers in time when
 // the primary is hung; long enough that a merely slow-but-healthy
 // primary still wins, so we don't double-bill tokens on every request.
-export const CHAT_FALLBACK_STAGGER_MS = 700;
+export const CHAT_FALLBACK_STAGGER_MS = 500;
 
 // Prices in paise (₹1 = 100 paise). Single source of truth for order amounts.
 export const TIER_PRICES = {
