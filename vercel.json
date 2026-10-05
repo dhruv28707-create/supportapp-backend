@@ -9,6 +9,13 @@
       "maxDuration": 60
     }
   },
+  // Hobby plan allows max 12 serverless functions (one per file in api/).
+  // /api/chat and /api/chat/send ran the identical handler in two files, so
+  // /api/chat/send is served as a rewrite to /api/chat — same POST behavior
+  // with zero extra functions. This keeps the count at 12 after adding
+  // /api/user/usage. Express (src/app.ts) still registers both routes, so
+  // local/self-hosted behavior is unchanged.
+  "rewrites": [{ "source": "/api/chat/send", "destination": "/api/chat" }],
   "env": {
     "NODE_OPTIONS": "--no-deprecation"
   }
