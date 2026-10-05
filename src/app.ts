@@ -3,6 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { authMiddleware } from './middleware/authMiddleware';
 import { getUserPlanHandler } from './routes/userPlan';
+import { getUsageHandler } from './routes/usage';
 import { chatSendHandler } from './routes/chatSend';
 import { razorpayWebhookHandler } from './routes/razorpayWebhook';
 import { paymentOrderHandler } from './routes/paymentOrder';
@@ -59,6 +60,9 @@ export function createApp(): express.Express {
   app.get('/api/plans', plansHandler);
 
   app.get('/api/user/plan', authMiddleware, getUserPlanHandler);
+  // Canonical source for Settings > Usage. /api/user/plan is kept for
+  // backward compat; new clients should use /api/user/usage.
+  app.get('/api/user/usage', authMiddleware, getUsageHandler);
 
   app.post('/api/chat', authMiddleware, chatSendHandler);
   app.post('/api/chat/send', authMiddleware, chatSendHandler);

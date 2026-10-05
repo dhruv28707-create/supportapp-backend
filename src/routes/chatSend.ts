@@ -7,6 +7,7 @@ import {
   CHAT_FALLBACK_STAGGER_MS,
   PLAN_CONFIG,
   isPersonalityAllowed,
+  isStrangerPersonality,
   PlanType,
   getQuotaUsageFraction,
 } from '../constants';
@@ -560,6 +561,14 @@ async function handleChatSend(
     religionSubType = religionSubType.toLowerCase();
   }
 
+  // Stranger is always anonymous and topic-only: faith overlays and any
+  // identity inference are dropped server-side so a client cannot smuggle
+  // them in via religionSubType.
+  const isStranger = isStrangerPersonality(personality);
+  if (isStranger) {
+    religionSubType = undefined;
+  }
+
   // --- Server-side persona gating (the frontend UI lock is cosmetic) ---
   // A 403 here must NOT consume quota and must NOT call any AI provider.
   // Runs BEFORE the env guard so a locked persona reports persona_locked
@@ -730,6 +739,7 @@ async function handleChatSend(
       uid,
       personality,
       religionSubType,
+      isStranger,
       messages,
       primary: PRIMARY,
       fallback: FALLBACK,
@@ -869,32 +879,42 @@ async function handleChatSend(
     // Echo back the effective persona so clients can confirm what was used.
     personality,
     religionSubType: religionSubType ?? null,
+    // Stranger contract: anonymous, topic-only, no persistence. Clients must
+    // not store these turns locally or in Firestore, must not show a named
+    // persona header, and must not feed prior turns as history.
+    ...(isStranger
+      ? { isStranger: true, anonymous: true, storeHistory: false, noHistory: true }
+      : {}),
     // Legacy app builds parse the raw OpenAI-style shape
     // (data.choices[0].message.content) instead of data.reply — return both
     // so old and new app versions both work.
     choices: [{ message: { role: 'assistant' as const, content: reply } }],
   });
 
-  // AI responded successfully — account for it WITHOUT blocking the reply.
-  // Previously this awaited consumeMessage (a fresh 1-3 sequential Firestore
-  // round-trips AFTER the AI had already answered): ~1s+ of dead wait on a
-  // ready reply in prod. The limit itself was already enforced by the pre-AI
-  // quota gate above, so this write is pure accounting — fire and forget.
-  // A racing request can overshoot the quota by one message at most (the same
-  // accepted trade-off as the limiter's non-transactional increments).
-  void consumeMessage(uid).catch((error: unknown) => {
+  // AI responded successfully — persist quota BEFORE the handler returns.
+  // The reply above is already flushed, so TTFB is unaffected; but the write
+  // MUST be awaited. The previous `void consumeMessage(...)` fire-and-forget
+  // let Vercel freeze the instance the moment the response ended, silently
+  // dropping the increment — users saw "no messages are being registered"
+  // and the 75% refill countdown never appeared. Awaiting here keeps the
+  // function alive just long enough to guarantee accounting. The pre-AI quota
+  // gate above still provides the instant 429; this is pure accounting.
+  try {
+    await consumeMessage(uid);
+  } catch (error: unknown) {
     if (error instanceof LimitReachedError) {
       console.warn(`[chat uid=${uid}] Quota filled during generation (reply already sent)`);
       return;
     }
     console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
-  });
+  }
 }
 
 interface StreamContext {
   uid: string;
   personality: PersonalityType;
   religionSubType: string | undefined;
+  isStranger: boolean;
   messages: { role: string; content: string }[];
   primary: ModelTarget;
   fallback: ModelTarget;
@@ -921,7 +941,7 @@ interface StreamContext {
  * critically — never recorded as a breaker failure.
  */
 async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<void> {
-  const { uid, personality, religionSubType, messages } = ctx;
+  const { uid, personality, religionSubType, isStranger, messages } = ctx;
   const { primary, fallback, clientGoneSignal } = ctx;
 
   const targetsToTry = primary.model === fallback.model ? [primary] : [primary, fallback];
@@ -1103,21 +1123,30 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
         `ttft=${ttft}ms total=${tAi - ctx.t0}ms`
     );
 
-    // Quota was already enforced by the pre-AI gate — this write is pure
-    // accounting and rides in the background so it never delays the stream.
-    void consumeMessage(uid).catch((error: unknown) => {
+    // Quota was already enforced by the pre-AI gate. Persist it BEFORE
+    // closing the stream so the write is guaranteed even on serverless
+    // (same Vercel-freeze bug as the buffered path). Tokens already
+    // streamed progressively, so this only delays the final `done` event
+    // by one Firestore write — and the next GET /api/user/usage then sees
+    // the correct count immediately.
+    try {
+      await consumeMessage(uid);
+    } catch (error: unknown) {
       if (error instanceof LimitReachedError) {
         console.warn(`[chat uid=${uid}] Quota filled during generation (stream already sent)`);
-        return;
+      } else {
+        console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
       }
-      console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
-    });
+    }
 
     sendEvent({
       done: true,
       reply: fullReply,
       personality,
       religionSubType: religionSubType ?? null,
+      ...(isStranger
+        ? { isStranger: true, anonymous: true, storeHistory: false, noHistory: true }
+        : {}),
       choices: [{ message: { role: 'assistant' as const, content: fullReply } }],
     });
     endStream();

@@ -21,6 +21,7 @@ export const PERSONALITIES = [
   'Wife',
   'Boyfriend',
   'Girlfriend',
+  'Stranger',
 ] as const;
 
 export type PersonalityType = (typeof PERSONALITIES)[number];
@@ -30,6 +31,8 @@ export type PersonalityType = (typeof PERSONALITIES)[number];
  * (src/routes/chatSend.ts). The frontend's UI locks are cosmetic only.
  *
  * Family + friend personas are free; the rest require a paid plan.
+ * Stranger is intentionally free for every plan (anonymous listener with no
+ * history) so any user can vent without commitment.
  * If this list ever changes, keep it in sync with the frontend's plan screen.
  */
 export const FREE_PERSONALITIES: readonly string[] = [
@@ -39,7 +42,20 @@ export const FREE_PERSONALITIES: readonly string[] = [
   'Brother',
   'Friend',
   'Best Friend',
+  'Stranger',
 ];
+
+/**
+ * The anonymous listener persona. Backend treats it specially:
+ * - allowed on every plan (see FREE_PERSONALITIES)
+ * - replies carry `storeHistory: false` so clients must not persist chats
+ * - the system prompt assumes zero user identity (no name/gender/memory)
+ */
+export const STRANGER_PERSONALITY = 'Stranger' as const;
+
+export function isStrangerPersonality(personality: string): boolean {
+  return personality === STRANGER_PERSONALITY;
+}
 
 export function isPersonalityAllowed(plan: PlanType, personality: string): boolean {
   if (plan !== DEFAULT_PLAN) return true; // every paid plan unlocks all personas
