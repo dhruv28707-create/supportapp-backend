@@ -87,6 +87,7 @@ describe('Chat endpoints (the 404 regression)', () => {
 
     expect(res.status).toBe(429);
     expect(res.body.limitReached).toBe(true);
+    expect(res.body.code).toBe('quota_exhausted');
     expect(typeof res.body.nextRefreshAt).toBe('number');
     // No provider spend for a rejection.
     expect(mockFetch).not.toHaveBeenCalled();
@@ -158,6 +159,44 @@ describe('Chat endpoints (the 404 regression)', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Invalid personality');
   });
+
+  it('coerces legacy personality/religion aliases instead of 400', async () => {
+    primeAuth('u1');
+    mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'hi' } }] }));
+
+    const alias = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'hi', personality: 'BestFriend' });
+    expect(alias.status).toBe(200);
+    expect(alias.body.personality).toBe('Best Friend');
+
+    // 'BF' coerces to Boyfriend (locked on free) — 403 proves coercion ran.
+    const bf = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'hi', personality: 'BF' });
+    expect(bf.status).toBe(403);
+    expect(bf.body.code).toBe('persona_locked');
+    expect(bf.body.personality).toBe('Boyfriend');
+
+    // 'muslim' is accepted as 'islamic'.
+    const muslim = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'hi', personality: 'Friend', religionSubType: 'muslim' });
+    expect(muslim.status).toBe(200);
+  });
+
+  it('rejects messages over 2000 characters', async () => {
+    primeAuth('u1');
+    const res = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'x'.repeat(2001), personality: 'Friend' });
+    expect(res.status).toBe(400);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /api/user/plan', () => {
@@ -175,6 +214,9 @@ describe('GET /api/user/plan', () => {
     expect(res.body.plan).toBe('pro');
     expect(res.body.messagesRemaining).toBe(70);
     expect(res.body.isLimitReached).toBe(false);
+    expect(res.body.expiresAt).toBeNull();
+    expect(typeof res.body.refillInMs).toBe('number');
+    expect(res.body.refreshHours).toBe(4);
   });
 
   it('downgrades an expired paid plan to free', async () => {

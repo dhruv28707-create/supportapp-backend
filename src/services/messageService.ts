@@ -7,6 +7,8 @@ export interface UserMessageState {
   plan: PlanType;
   messageCount: number;
   lastResetAt: number;
+  /** Active paid/trial term end (epoch ms), else null. */
+  expiresAt: number | null;
   /** True while the 5-day Ultimate free trial is active. */
   isTrial: boolean;
   /** Trial end (epoch ms) while a trial is active, else null. */
@@ -146,6 +148,7 @@ export async function getPlanState(uid: string): Promise<UserMessageState> {
     plan: state.plan,
     messageCount,
     lastResetAt,
+    expiresAt: state.expiresAt,
     isTrial: state.isTrial,
     trialEndsAt: state.trialEndsAt,
     trialUsed: state.trialUsed,
@@ -280,6 +283,7 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
     plan: state.plan,
     messageCount,
     lastResetAt,
+    expiresAt: state.expiresAt,
     isTrial: state.isTrial,
     trialEndsAt: state.trialEndsAt,
     trialUsed: state.trialUsed,

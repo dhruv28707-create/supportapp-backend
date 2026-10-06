@@ -1,6 +1,6 @@
 # SAFESPACE Backend
 
-Backend for **SAFESPACE** — an emotional support chat app with 12 AI personalities, optional spiritual guidance overlays, and Razorpay-powered subscriptions (freemium).
+Backend for **SAFESPACE** — an emotional support chat app with 13 AI personalities, optional spiritual guidance overlays, and Razorpay-powered subscriptions (freemium).
 
 - **Runtime:** Node.js >= 18 (uses native `fetch`), TypeScript (strict)
 - **Hosting:** Vercel serverless functions (`api/`) — the same handlers also run as an Express app (`src/index.ts`) for local/self-hosted use
@@ -67,9 +67,9 @@ Request body:
 
 | Field | Rules |
 |---|---|
-| `message` | Required string, 1–4000 chars. Legacy clients may instead send `messages: [...]` (OpenAI-style); only the latest user turn is used — there is no server-side conversation memory. |
-| `personality` | Optional. One of `Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`, `Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`. Omitted → defaults to `Friend`. Invalid value → **400** with the list of valid options. `Guide_<religion>` (e.g. `Guide_hindu`) is accepted as an alias for `personality: "Guide"` + `religionSubType` |
-| `religionSubType` | Optional. Only used when `personality` is `Guide`. One of `islamic`, `hindu`, `christian`, `buddhist`, `jewish`, `spiritual`, `secular`. Invalid value → 400. |
+| `message` | Required string, 1–2000 chars. Legacy clients may instead send `messages: [...]` (OpenAI-style, max 50 entries); only the latest user turn is used — there is no server-side conversation memory. |
+| `personality` | Optional. One of `Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`, `Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`, `Stranger`. Omitted → defaults to `Friend`. Legacy shorthands (`BestFriend`, `BF`, `GF`) are coerced server-side; anything else invalid → **400** with the list of valid options. `Guide_<religion>` (e.g. `Guide_hindu`) is accepted as an alias for `personality: "Guide"` + `religionSubType` |
+| `religionSubType` | Optional. Only used when `personality` is `Guide`. One of `islamic`, `hindu`, `christian`, `buddhist`, `jewish`, `spiritual`, `secular` (`muslim` is accepted as `islamic`). Invalid value → 400. |
 
 **Persona gating is enforced server-side.** Free plans can use the family & friend personas (`Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`); the rest (`Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`) require an active pro/ultimate plan. A locked persona returns **403** `{ code: 'persona_locked', plan, personality }` and consumes no quota. The frontend's UI locks are cosmetic only.
 
@@ -92,7 +92,7 @@ Errors:
 |---|---|
 | 400 | Missing/invalid message, personality, or religionSubType |
 | 403 | Persona not allowed on the user's plan (`code: 'persona_locked'`) |
-| 429 | Message quota exhausted → `{ limitReached: true, nextRefreshAt }` (epoch ms) — also used by the abuse rate limiter (30 requests / 5 min / user, fail-open) |
+| 429 | Message quota exhausted → `{ limitReached: true, code: 'quota_exhausted', nextRefreshAt }` (epoch ms) — also used by the abuse rate limiter (30 requests / 5 min / user, fail-open) |
 | 503 | AI upstream unavailable (`code: 'ai_key_missing'` or `'ai_upstream_error'`) — quota is never consumed on 503 | |
 
 Quota is consumed **only** after a successful AI reply.
@@ -106,7 +106,10 @@ Current plan and quota state. **Auth required.**
   "plan": "free",
   "messagesRemaining": 17,
   "nextRefreshAt": 1756160000000,
+  "refillInMs": 17400000,
+  "refreshHours": 5,
   "isLimitReached": false,
+  "expiresAt": null,
   "isTrial": false,
   "trialEndsAt": null,
   "trialUsed": false,
@@ -127,6 +130,8 @@ Public pricing catalog for the post-trial choice cards. No auth.
   "currency": "INR",
   "options": [
     { "id": "free", "plan": "free", "tier": null, "label": "Free", "amount": 0, "amountPaise": 0, "period": null, "recommended": false },
+    { "id": "pro_monthly", "plan": "pro", "tier": "pro_monthly", "label": "Pro Monthly", "amount": 179, "amountPaise": 17900, "period": "monthly", "recommended": false },
+    { "id": "pro_yearly", "plan": "pro", "tier": "pro_yearly", "label": "Pro Yearly", "amount": 699, "amountPaise": 69900, "period": "yearly", "recommended": false },
     { "id": "ultimate_monthly", "plan": "ultimate", "tier": "ultimate_monthly", "label": "Ultimate Monthly", "amount": 199, "amountPaise": 19900, "period": "monthly", "recommended": true },
     { "id": "ultimate_yearly", "plan": "ultimate", "tier": "ultimate_yearly", "label": "Ultimate Yearly", "amount": 799, "amountPaise": 79900, "period": "yearly", "recommended": false }
   ]
@@ -163,7 +168,7 @@ Errors:
 | 409 | `{ code: 'trial_already_used' }` — this account already trialed |
 | 409 | `{ code: 'already_subscribed' }` — account already has a paid plan |
 
-Behavior: during the trial the user gets full Ultimate perks (all 12 personas, 200 msgs / 2h). When the 5 days end, the existing expiry downgrade returns them to `free`; the app then shows the `/api/plans` choice cards (free / monthly / yearly). A trial **never blocks `DELETE /api/account`**, and `POST /api/payment-cancel` ends it early (immediate downgrade). Buying an Ultimate tier at any point replaces the trial and keeps `trialUsed` set, so a trial can never be restarted.
+Behavior: during the trial the user gets full Ultimate perks (all 13 personas, 200 msgs / 2h). When the 5 days end, the existing expiry downgrade returns them to `free`; the app then shows the `/api/plans` choice cards (free / pro / ultimate, monthly / yearly). A trial **never blocks `DELETE /api/account`**, and `POST /api/payment-cancel` ends it early (immediate downgrade). Buying an Ultimate tier at any point replaces the trial and keeps `trialUsed` set, so a trial can never be restarted.
 
 ### POST /api/payment-order
 
@@ -238,7 +243,7 @@ Diagnostics — **disabled by default.** Set `ENABLE_DIAGNOSE=true` to enable (d
 - Payment flow: `POST /api/payment-order` → open Razorpay Checkout with `orderId`, `amount`, `currency`, `keyId` → on success call `POST /api/payment-verify` with the three checkout fields. Safe to retry verify on network failures.
 - Refresh plan/quota from `GET /api/user/plan` after app resume or payment success.
 - Account deletion: do NOT delete Firestore docs from the client first (the rules deny it — `[firestore/permission-denied]`). Call `POST /api/payment-cancel` if there is an active subscription, then `DELETE /api/account`, then just `auth().signOut()`. The backend wipes all server-side data, including the Firebase Auth account and chat history — `currentUser.delete()` after the API call throws `[auth/no-current-user]`. If an older build still calls it, catch `auth/no-current-user` / `auth/user-not-found` and treat them as success.
-- Free trial: when `GET /api/user/plan` returns `trialAvailable: true`, show a "Start 5 days of Ultimate free" CTA that calls `POST /api/trial/start`. While `isTrial` is true, surface `trialEndsAt` (e.g. "Trial ends in 3 days"). Once `isTrial` flips back to false, fetch `GET /api/plans` and render the free / monthly / yearly **choice cards** (a cancel or trial end takes the user straight there). Treat a 409 `trial_already_used` / `already_subscribed` as "hide the CTA".
+- Free trial: when `GET /api/user/plan` returns `trialAvailable: true`, show a "Start 5 days of Ultimate free" CTA that calls `POST /api/trial/start`. While `isTrial` is true, surface `trialEndsAt` (e.g. "Trial ends in 3 days"). Once `isTrial` flips back to false, fetch `GET /api/plans` and render the free / pro / ultimate **choice cards** (a cancel or trial end takes the user straight there). Treat a 409 `trial_already_used` / `already_subscribed` as "hide the CTA".
 
 ## Environment variables
 

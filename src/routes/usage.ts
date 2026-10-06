@@ -19,7 +19,7 @@ export async function getUsageHandler(req: AuthenticatedRequest, res: Response):
   const uid = req.user!.uid;
 
   try {
-    const { plan, messageCount, lastResetAt, isTrial, trialEndsAt, trialUsed } =
+    const { plan, messageCount, lastResetAt, expiresAt, isTrial, trialEndsAt, trialUsed } =
       await checkAndResetOnly(uid);
 
     const limit = PLAN_CONFIG[plan].limit;
@@ -56,6 +56,7 @@ export async function getUsageHandler(req: AuthenticatedRequest, res: Response):
       refreshHours: refreshMs / (60 * 60 * 1000),
       isLimitReached,
       showRefillTimer,
+      expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
       isTrial,
       trialEndsAt,
       trialUsed,

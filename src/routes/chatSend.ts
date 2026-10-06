@@ -2,6 +2,8 @@ import { Response, Request } from 'express';
 import {
   PersonalityType,
   PERSONALITIES,
+  PERSONALITY_ALIASES,
+  RELIGION_ALIASES,
   LimitReachedError,
   AI_TIMEOUT_MS,
   CHAT_FALLBACK_STAGGER_MS,
@@ -90,7 +92,7 @@ function getModelTargets(): { PRIMARY: ModelTarget; FALLBACK: ModelTarget } {
 // mid-sentence cuts. Generation time scales with tokens emitted, so this
 // stays tight for latency.
 const MAX_TOKENS = 300;
-const MAX_MESSAGE_LENGTH = 4000;
+const MAX_MESSAGE_LENGTH = 2000;
 // Bound on the legacy `messages[]` fallback so one request can't force the
 // server to scan an unbounded array.
 const MAX_LEGACY_MESSAGES = 50;
@@ -456,44 +458,53 @@ async function handleChatSend(
   }
 
   // Personality: omitted defaults to Friend; explicitly invalid is rejected.
-  // "Guide_<religion>" (e.g. "Guide_hindu") selects Guide with that overlay.
+  // Legacy shorthands (BestFriend, BF, GF) are coerced so old app versions
+  // and stored values keep working. "Guide_<religion>" selects Guide with
+  // that overlay.
   let personality: PersonalityType = 'Friend';
   let religionSubType: string | undefined =
     typeof body.religionSubType === 'string' ? body.religionSubType : undefined;
 
-  // Frontend compat: "Guide_<religion>" selects Guide with that overlay.
+  const requestedPersonality =
+    typeof body.personality === 'string'
+      ? (PERSONALITY_ALIASES[body.personality] ?? body.personality)
+      : body.personality;
   const guideAlias =
-    typeof body.personality === 'string' && body.personality.startsWith('Guide_')
-      ? body.personality
+    typeof requestedPersonality === 'string' && requestedPersonality.startsWith('Guide_')
+      ? requestedPersonality
       : null;
 
-  if (body.personality !== undefined && !guideAlias) {
+  if (requestedPersonality !== undefined && !guideAlias) {
     if (
-      typeof body.personality !== 'string' ||
-      !PERSONALITIES.includes(body.personality as PersonalityType)
+      typeof requestedPersonality !== 'string' ||
+      !PERSONALITIES.includes(requestedPersonality as PersonalityType)
     ) {
       sendJson(res, 400, {
         error: `Invalid personality. Valid options: ${PERSONALITIES.join(', ')}`,
       });
       return;
     }
-    personality = body.personality as PersonalityType;
+    personality = requestedPersonality as PersonalityType;
   }
 
   if (guideAlias) {
     personality = 'Guide';
     const aliasReligion = guideAlias.slice('Guide_'.length).toLowerCase();
+    const canonicalReligion = RELIGION_ALIASES[aliasReligion] ?? aliasReligion;
     // Unknown suffix: plain Guide (buildSystemPrompt falls back to spiritual).
-    religionSubType = RELIGION_KEYS.includes(aliasReligion) ? aliasReligion : undefined;
+    religionSubType = RELIGION_KEYS.includes(canonicalReligion) ? canonicalReligion : undefined;
   }
 
-  // religionSubType is user input injected into the system prompt — allowlist only.
+  // religionSubType is user input injected into the system prompt — allowlist
+  // only, after alias resolution (muslim -> islamic).
   if (religionSubType !== undefined) {
-    if (!RELIGION_KEYS.includes(religionSubType.toLowerCase())) {
+    const lowered = religionSubType.toLowerCase();
+    const canonical = RELIGION_ALIASES[lowered] ?? lowered;
+    if (!RELIGION_KEYS.includes(canonical)) {
       sendJson(res, 400, { error: 'Invalid religionSubType' });
       return;
     }
-    religionSubType = religionSubType.toLowerCase();
+    religionSubType = canonical;
   }
 
   // Stranger is anonymous and topic-only: faith overlays are dropped so a
@@ -539,6 +550,7 @@ async function handleChatSend(
   if (planState.messageCount >= quotaConfig.limit) {
     sendJson(res, 429, {
       limitReached: true,
+      code: 'quota_exhausted',
       nextRefreshAt: planState.lastResetAt + quotaConfig.refreshMs,
       showRefillTimer: true,
       messagesUsed: Math.max(0, planState.messageCount),

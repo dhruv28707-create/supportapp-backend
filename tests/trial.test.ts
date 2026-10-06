@@ -145,7 +145,7 @@ describe('GET /api/user/plan during a trial', () => {
 });
 
 describe('GET /api/plans (choice cards)', () => {
-  it('returns free + Ultimate monthly + yearly, priced from TIER_PRICES', async () => {
+  it('returns free + Pro + Ultimate tiers, priced from TIER_PRICES', async () => {
     const res = await request(app).get('/api/plans');
     expect(res.status).toBe(200);
     expect(res.body.currency).toBe('INR');
@@ -153,8 +153,10 @@ describe('GET /api/plans (choice cards)', () => {
     const byId = Object.fromEntries(
       (res.body.options as Array<{ id: string; amountPaise: number; plan: string }>).map((o) => [o.id, o])
     );
-    expect(Object.keys(byId).sort()).toEqual(['free', 'ultimate_monthly', 'ultimate_yearly']);
+    expect(Object.keys(byId).sort()).toEqual(['free', 'pro_monthly', 'pro_yearly', 'ultimate_monthly', 'ultimate_yearly']);
     expect(byId.free.amountPaise).toBe(0);
+    expect(byId.pro_monthly.amountPaise).toBe(TIER_PRICES.pro_monthly);
+    expect(byId.pro_yearly.amountPaise).toBe(TIER_PRICES.pro_yearly);
     expect(byId.ultimate_monthly.amountPaise).toBe(TIER_PRICES.ultimate_monthly);
     expect(byId.ultimate_yearly.amountPaise).toBe(TIER_PRICES.ultimate_yearly);
   });
