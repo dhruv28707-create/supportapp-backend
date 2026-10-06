@@ -21,19 +21,13 @@ interface PaidPaymentFields {
 }
 
 /**
- * Server-only collections. The frontend never writes to these, so even if
- * client Firestore rules are permissive on other collections, plan state
- * cannot be forged by users.
+ * Server-only collections. The frontend never writes here, so plan state
+ * can't be forged by users.
  */
 export const SUBSCRIPTIONS_COLLECTION = 'subscriptions';
 export const PAYMENTS_COLLECTION = 'payments';
 
-/** Subscription status lifecycle on subscriptions/{uid}:
- *  - active:    granted by payment (no explicit field = active)
- *  - cancelled: user cancelled (POST /api/payment-cancel); perks end now
- *
- *  (Expiry to 'free' is handled separately by applyExpiry in messageService.)
- */
+/** Subscription status on subscriptions/{uid}. Missing/unknown reads as active. */
 export type SubscriptionStatus = 'active' | 'cancelled';
 
 /** Normalizes a stored status value, treating missing/unknown as 'active'. */
@@ -67,17 +61,10 @@ export function computeExpiresAtMs(
 }
 
 /**
- * Grants a paid plan and marks the payment as paid, idempotently.
- *
- * ONLY call after the payment has been authoritatively verified
- * (signature + Razorpay payment fetch + amount match).
- *
- * Transactional on payments/{orderId}: concurrent double-verify/webhook races
- * on the SAME order serialize here, so the second caller sees status 'paid'
- * and returns without resetting messageCount or extending expiry. Grants for
- * DIFFERENT orders touch different docs and never contend. Payment grants are
- * low-QPS, so the transaction cost is negligible (unlike the hot chat quota
- * path, which stays transaction-free by design).
+ * Grants a paid plan and marks the payment paid, idempotently. Call only
+ * after authoritative verification (signature + Razorpay fetch + amount).
+ * Transactional on payments/{orderId} so concurrent verify/webhook races on
+ * the same order grant exactly once.
  */
 export async function grantPlanAndMarkPaid(
   uid: string,
@@ -96,9 +83,8 @@ export async function grantPlanAndMarkPaid(
     const paySnap = await tx.get(payRef);
     const record: DocumentData = paySnap.exists ? paySnap.data() || {} : {};
 
-    // Idempotency — a concurrent path already granted this order. Enforce
-    // ownership even on replay: a different uid claiming a paid order gets a
-    // UID-mismatch error instead of a silent plan leak.
+    // Idempotency: a concurrent path already granted this order. Ownership
+    // is still enforced on replay.
     if (record.status === 'paid') {
       if (record.uid !== undefined && record.uid !== uid) {
         throw new Error(`Order ${orderId} belongs to a different uid; refusing to grant`);
@@ -106,13 +92,13 @@ export async function grantPlanAndMarkPaid(
       return tierToPlan(String(record.tier ?? tier)) ?? plan;
     }
 
-    // Defensive re-check: the doc must still describe the same order we verified.
+    // Defensive re-check: the doc must still describe the same order.
     if (record.uid !== undefined && record.uid !== uid) {
       throw new Error(`Order ${orderId} belongs to a different uid; refusing to grant`);
     }
 
-    // Use the record's own amount when present so the grant matches what the
-    // order was created with (never a client-supplied value).
+    // Use the record's own amount/tier so the grant matches what the order
+    // was created with, never a client-supplied value.
     const recordTier = typeof record.tier === 'string' ? record.tier : tier;
     const effectivePlan = tierToPlan(recordTier) ?? plan;
     const expiresAt = computeExpiresAtMs(recordTier);
@@ -130,17 +116,15 @@ export async function grantPlanAndMarkPaid(
 
     tx.set(subRef, {
       plan: effectivePlan,
-      // Re-grant after a cancel must clear the cancelled marker, or the new
-      // paid plan would still read as cancelled downstream.
+      // A re-grant after cancel must clear the cancelled marker.
       status: 'active',
       expiresAt,
       messageCount: 0,
       lastResetAt: now,
       updatedAt: now,
       lastOrderId: orderId,
-      // A purchase replaces any free-trial state; `trialUsed` is deliberately
-      // NOT touched here (merge preserves it) so a trialing user can never
-      // start a second trial after they subscribe.
+      // A purchase replaces trial state; `trialUsed` is preserved by the
+      // merge so a second trial can never start after subscribing.
       isTrial: false,
       trialEndsAt: null,
     }, { merge: true });
@@ -153,17 +137,10 @@ export async function grantPlanAndMarkPaid(
 }
 
 /**
- * Cancels the user's subscription: plan drops to free and perks end now
- * (immediate mode, per the Delete Account flow this endpoint serves).
- *
- * Idempotent: cancelling an already-cancelled/absent subscription changes
- * nothing. Returns whether an active subscription was actually cancelled.
- *
- * Note: this backend's payments are one-time Razorpay orders, so there is
- * normally no Razorpay subscription entity to cancel — this only flips the
- * local state. If a Razorpay subscription id is ever present on the record
- * (future recurring plans), the caller cancels it with the Razorpay API
- * BEFORE calling this; its failure must not block the local cancellation.
+ * Cancels the subscription: plan drops to free, perks end now. Idempotent.
+ * One-time Razorpay orders have no server-side subscription entity, so this
+ * only flips local state (a Razorpay subscription id, if ever present, is
+ * cancelled best-effort by the caller first).
  */
 export async function cancelUserSubscription(uid: string): Promise<boolean> {
   const now = Date.now();
@@ -174,8 +151,6 @@ export async function cancelUserSubscription(uid: string): Promise<boolean> {
   if (!snap.exists) return false;
 
   const data = snap.data() || {};
-  // Only a doc that actually carries a paid plan is cancellable; a free
-  // plan (or an expired one already downgraded to free) has nothing active.
   if (normalizeStatus(data.status) !== 'active' || data.plan === DEFAULT_PLAN) {
     return false;
   }
@@ -190,8 +165,7 @@ export async function cancelUserSubscription(uid: string): Promise<boolean> {
       lastOrderId: typeof data.lastOrderId === 'string' ? data.lastOrderId : null,
       cancelledAt: new Date(now),
       updatedAt: now,
-      // Cancelling a free trial ends it cleanly; `trialUsed` stays true so it
-      // cannot be restarted (merge preserves the field).
+      // Cancelling a trial ends it; `trialUsed` stays true (merge preserves it).
       isTrial: false,
       trialEndsAt: null,
     },
@@ -222,16 +196,9 @@ export interface TrialGrant {
 }
 
 /**
- * Grants the 5-day Ultimate free trial, transactionally and idempotently.
- *
- * The transaction on subscriptions/{uid} makes the one-trial-per-account
- * guard atomic: two concurrent calls both read the doc, but the second sees
- * `trialUsed: true` (or the trial plan) and is refused — never two grants.
- *
- * Account-age eligibility (new users only) is enforced by the ROUTE before
- * calling this, since it needs the Firebase Auth user record.
- *
- * Callers must NOT depend on a Razorpay order: no payment is involved.
+ * Grants the 5-day Ultimate trial, transactionally. The transaction makes
+ * the one-trial-per-account guard atomic under concurrent calls.
+ * Account-age eligibility is checked by the route (needs the Auth record).
  */
 export async function startUltimateTrial(uid: string): Promise<TrialGrant> {
   const now = Date.now();
@@ -263,8 +230,8 @@ export async function startUltimateTrial(uid: string): Promise<TrialGrant> {
         trialEndsAt: expiresAt,
         // Permanent marker: merge writes elsewhere never clear it.
         trialUsed: true,
-        // expiresAt drives the existing applyExpiry downgrade, so the trial
-        // ends through the same code path as a paid term.
+        // `expiresAt` drives the standard expiry downgrade, so the trial ends
+        // through the same path as a paid term.
         expiresAt,
         messageCount: 0,
         lastResetAt: now,

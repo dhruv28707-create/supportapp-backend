@@ -64,8 +64,7 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
   }
 
   if (rawBody !== null) {
-    // Signature is computed over the exact raw request bytes. Secret read
-    // lazily per request so rotation/stubbed env takes effect without restart.
+    // Signature is computed over the exact raw request bytes.
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
     const expectedHex = crypto
       .createHmac('sha256', webhookSecret || '')
@@ -86,9 +85,16 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
       return;
     }
   } else if (req.body && typeof req.body === 'object') {
-    // Body was pre-parsed by the platform, so the raw bytes are gone and the
-    // HMAC cannot be recomputed. The event is still authoritatively validated
-    // below against Razorpay's API and our own order record before any grant.
+    // The platform pre-parsed the body, so the raw bytes needed for the HMAC
+    // are gone. The event is still cross-checked against Razorpay's API
+    // below, but a forged payload with real captured-payment ids could pass
+    // that check — so when a webhook secret is configured, require the raw
+    // path instead of accepting unverifiable bytes.
+    if (process.env.RAZORPAY_WEBHOOK_SECRET) {
+      console.warn('Webhook received a pre-parsed body; raw body required for signature check');
+      res.status(400).json({ error: 'Invalid body' });
+      return;
+    }
     console.warn('Webhook received a pre-parsed body; validating via Razorpay API');
     event = req.body;
   } else {
@@ -96,7 +102,7 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
     return;
   }
 
-  // Acknowledge non-payment events without doing anything.
+  // Acknowledge non-payment events.
   if (event?.event !== 'payment.captured') {
     res.status(200).json({ received: true });
     return;
@@ -134,9 +140,8 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
       return;
     }
 
-    // Authoritative check with Razorpay: the payment must exist, be captured,
-    // and belong to this exact order. A forged or unauthenticated webhook
-    // cannot pass this check.
+    // Authoritative check: the payment must exist at Razorpay, be captured,
+    // and belong to this exact order.
     let rzPayment: PaymentCheck | undefined;
     try {
       rzPayment = await razorpay.payments.fetch(paymentId);
@@ -160,14 +165,13 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
       return;
     }
 
-    // Plan and expiry come from our own order record — never from client notes.
+    // Plan and expiry come from our own order record, never client input.
     await grantPlanAndMarkPaid(record.uid, record.tier, orderId, paymentId);
 
     console.log('Plan granted via webhook:', { uid: record.uid, tier: record.tier, orderId });
     res.status(200).json({ received: true });
   } catch (error) {
     console.error('Webhook processing error:', error);
-    // Non-2xx so Razorpay retries the delivery.
     res.status(500).json({ error: 'Processing failed' });
   }
 }

@@ -61,10 +61,9 @@ function normalizeState(data: Record<string, unknown>): SubscriptionState {
 }
 
 /**
- * Reads subscription state from the server-only `subscriptions/{uid}` doc
- * (plain reads, no transaction). On missing doc, falls back to the legacy
- * `users/{uid}` plan — trusted ONLY when backed by a verified paid payment
- * record (the users collection may be client-writable).
+ * Reads subscription state from server-only `subscriptions/{uid}`. On a
+ * missing doc, falls back to legacy `users/{uid}` only when backed by a
+ * verified paid payment record (users docs may be client-writable).
  */
 async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
   const subSnap = await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).get();
@@ -110,10 +109,8 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
     state.expiresAt !== null &&
     now >= state.expiresAt
   ) {
-    // Downgrade resets quota so the user starts fresh on free (otherwise a
-    // heavy paid user would land on free with 0 remaining messages). A trial
-    // ends through this exact path; `trialUsed` is preserved by the spread so
-    // the account can never trial again.
+    // Downgrade resets quota so the user starts fresh on free. `trialUsed`
+    // survives via the spread.
     return {
       ...state,
       plan: DEFAULT_PLAN,
@@ -126,16 +123,12 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
   return state;
 }
 
-// ---------------------------------------------------------------------------
-// Plan-state reads are always fresh (no in-memory cache). Firestore reads are
-// cheap (~1 read per chat/plan call) and always coherent across serverless
-// instances, so no cache layer exists by design.
-// ---------------------------------------------------------------------------
+// Plan-state reads are always fresh from Firestore (no cache), so every
+// serverless instance sees coherent state.
 
 /**
- * Effective plan (expiry applied, window refreshed in the returned numbers)
- * WITHOUT consuming anything or writing to Firestore. Always reads fresh
- * from Firestore. Used by read-only decisions such as server-side persona gating.
+ * Effective plan (expiry applied, window refreshed) without consuming
+ * anything. Used for read-only decisions like persona gating.
  */
 export async function getPlanState(uid: string): Promise<UserMessageState> {
   const now = Date.now();
@@ -160,28 +153,18 @@ export async function getPlanState(uid: string): Promise<UserMessageState> {
 }
 
 /**
- * Consumes one message from the user's quota. Throws LimitReachedError when
- * the limit is hit. Call this only AFTER a successful AI reply so that failed
- * AI calls do not burn the user's message allowance.
+ * Consumes one message of quota. Throws LimitReachedError at the limit. Call
+ * only after a successful AI reply so failures don't burn allowance.
  *
- * Concurrency: the counter is a single atomic FieldValue.increment(1) on
- * `subscriptions/{uid}` — no transaction. The old transactional
- * read-check-write serialized every burst on one doc (~1 write/sec/doc
- * soft cap), causing transaction retries and 500s under load. The
- * allow-check reads the pre-increment count, so a hard concurrent burst can
- * overshoot the plan limit slightly; for a chat quota that is acceptable
- * (the user genuinely sent those messages), while availability under load
- * improves dramatically.
- *
- * Rare repairs piggyback on the same write: refreshing an expired window
- * (lastResetAt), persisting an expiry downgrade to free (plan + expiresAt),
- * and materializing a migrated legacy plan on the user's first message.
+ * Single atomic increment(1), no transaction: transactions serialize per doc
+ * and collapse under burst load. A hard concurrent burst can overshoot the
+ * limit slightly — acceptable for a chat quota; availability matters more.
  */
 export async function consumeMessage(uid: string): Promise<{ success: true }> {
   const now = Date.now();
 
-  // Load fresh state: getPlanState's window-refresh would mask whether the
-  // stored window actually rolled over.
+  // getPlanState's window-refresh would mask whether the stored window
+  // actually rolled over, so load raw state here.
   const raw = await loadSubscriptionState(uid);
   const state = applyExpiry(raw, now);
   const downgraded = state.plan !== raw.plan || state.expiresAt !== raw.expiresAt;
@@ -202,9 +185,8 @@ export async function consumeMessage(uid: string): Promise<{ success: true }> {
   const needsResetWrite = windowExpired || downgraded;
 
   if (needsResetWrite) {
-    // Persist the reset (and any expiry downgrade) with an explicit count
-    // of 1: FieldValue.increment(1) would keep growing from the stale
-    // stored value (e.g. 20 -> 21) instead of resetting to 1.
+    // Persist the reset with an explicit count of 1: increment(1) would keep
+    // growing from the stale stored value instead of resetting.
     const fields: Record<string, unknown> = {
       plan: state.plan,
       expiresAt: state.expiresAt,
@@ -224,8 +206,6 @@ export async function consumeMessage(uid: string): Promise<{ success: true }> {
       updatedAt: now,
     };
     if (state.plan === DEFAULT_PLAN) {
-      // Free plan (including a just-applied expiry downgrade): clear any
-      // stale expiry/trial fields so downstream reads see a consistent doc.
       fields.expiresAt = null;
       fields.isTrial = false;
       fields.trialEndsAt = null;
@@ -238,10 +218,8 @@ export async function consumeMessage(uid: string): Promise<{ success: true }> {
 }
 
 /**
- * Read path for GET /api/user/plan: returns current state and, when the
- * window has rolled over, persists the reset (and any expiry downgrade) so
- * other endpoints see consistent state. Best-effort writes: a failed reset
- * write logs but still reports the refreshed numbers.
+ * Read path for GET /api/user/plan: current state, persisting a rolled-over
+ * window or expiry downgrade best-effort so other endpoints see it too.
  */
 export async function checkAndResetOnly(uid: string): Promise<UserMessageState> {
   const now = Date.now();
@@ -275,9 +253,7 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
       console.error(`[quota] Window reset write failed uid=${uid.slice(0, 8)}:`, error);
     }
   } else if (downgraded) {
-    // Expiry downgraded the plan relative to the stored doc — persist it and
-    // reset the quota so free starts at 0 (not the paid count). Include
-    // lastResetAt so the next read does not trigger another reset write.
+    // Persist the expiry downgrade and reset quota to 0 for the free plan.
     messageCount = 0;
     try {
       await db

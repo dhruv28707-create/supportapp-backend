@@ -1,16 +1,9 @@
 import { Request, Response } from 'express';
 
 /**
- * CORS configuration.
- *
- * Allowed origins come from the ALLOWED_ORIGINS env var (comma-separated,
- * or "*" for any origin). Falls back to local dev + production frontends
- * when unset, so a missing env var can never take the app down.
- *
- * Browser requests must come from an allowed origin; anything else with an
- * Origin header is rejected with 403 (in Vercel handlers) or gets no CORS
- * headers (Express, so the browser blocks it). Requests with no Origin
- * header (mobile apps, curl, server-to-server) are allowed.
+ * CORS config. Allowed origins come from ALLOWED_ORIGINS (comma-separated,
+ * or "*" for any). Browser requests need an allowed Origin; requests with
+ * no Origin header (mobile, curl, server-to-server) are allowed.
  */
 
 const DEFAULT_ALLOWED_ORIGINS = [
@@ -37,8 +30,8 @@ export function isOriginAllowed(origin: string | undefined): boolean {
 }
 
 /**
- * CORS enforcement for plain Vercel-style (req, res) handlers.
- * Returns true if the request may proceed, false if a response was already sent.
+ * CORS enforcement for Vercel-style (req, res) handlers.
+ * Returns true when the request may proceed.
  */
 export function enforceCors(req: Request, res: Response): boolean {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -46,13 +39,11 @@ export function enforceCors(req: Request, res: Response): boolean {
     'Access-Control-Allow-Headers',
     'Content-Type, Authorization, x-razorpay-signature, x-firebase-appcheck'
   );
-  // Cache per-origin: without Vary, a CDN can serve the wrong
-  // Access-Control-Allow-Origin to a different origin.
+  // Cache per-origin so a CDN can't serve the wrong Allow-Origin.
   res.setHeader('Vary', 'Origin');
 
   const origin = req.headers?.origin;
 
-  // Non-browser requests (mobile, curl, server-to-server) carry no Origin.
   if (!origin) return true;
 
   if (isOriginAllowed(origin)) {

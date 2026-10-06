@@ -46,32 +46,18 @@ interface ModelTarget {
   extraBody?: Record<string, unknown>;
 }
 
-/**
- * Groq (gpt-oss-20b). Chosen as the default PRIMARY because it is markedly
- * faster to first token than OpenRouter's Qwen3-14B — the model the user is
- * waiting on should be the quick one.
- * `GROQ_MODEL` is the clear name; `FALLBACK_MODEL` is the legacy name kept so
- * existing deployments keep working after the provider order was flipped.
- */
+/** Groq (gpt-oss-20b) — default primary, fastest to first token. */
 function groqTarget(): ModelTarget {
   return {
     name: 'groq',
     baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
     apiKey: process.env.GROQ_API_KEY || '',
     model: process.env.GROQ_MODEL || process.env.FALLBACK_MODEL || 'openai/gpt-oss-20b',
-    // reasoning_effort low: gpt-oss reasoning adds 10-40% latency per Groq's
-    // own guide — low keeps quality while cutting decode time.
-    // service_tier on_demand: guaranteed processing for realtime chat, never
-    // queued behind flex/batch throughput workloads.
     extraBody: { reasoning_effort: 'low', service_tier: 'on_demand' },
   };
 }
 
-/**
- * OpenRouter (Qwen3-14B). Slower but stronger — now the FALLBACK, so it only
- * answers when Groq is down or hung.
- * `OPENROUTER_MODEL` is the clear name; `PRIMARY_MODEL` is the legacy alias.
- */
+/** OpenRouter (Qwen3-14B) — slower, stronger; the fallback. */
 function openRouterTarget(): ModelTarget {
   return {
     name: 'openrouter',
@@ -82,12 +68,7 @@ function openRouterTarget(): ModelTarget {
   };
 }
 
-/**
- * Which provider answers first. Defaults to Groq because response latency is
- * dominated by the primary model's generation time, and gpt-oss-20b on Groq
- * is far quicker than Qwen3-14B on OpenRouter. Set
- * CHAT_PRIMARY_PROVIDER=openrouter to restore the old order.
- */
+/** Which provider answers first. Set CHAT_PRIMARY_PROVIDER=openrouter to flip. */
 function primaryProvider(): 'groq' | 'openrouter' {
   return (process.env.CHAT_PRIMARY_PROVIDER || '').toLowerCase() === 'openrouter'
     ? 'openrouter'
@@ -95,10 +76,8 @@ function primaryProvider(): 'groq' | 'openrouter' {
 }
 
 /**
- * Reads provider keys/targets lazily (per request) so tests can stub env vars
- * with vi.stubEnv AFTER the module was imported. Module-level
- * `process.env.X` captures would freeze the import-time value (usually
- * undefined in tests) and break every chat test with ai_key_missing.
+ * Provider targets, read per request so env stubs and rotation apply
+ * without a restart.
  */
 function getModelTargets(): { PRIMARY: ModelTarget; FALLBACK: ModelTarget } {
   const groq = groqTarget();
@@ -107,31 +86,19 @@ function getModelTargets(): { PRIMARY: ModelTarget; FALLBACK: ModelTarget } {
     ? { PRIMARY: openRouter, FALLBACK: groq }
     : { PRIMARY: groq, FALLBACK: openRouter };
 }
-// Both models are plain instruct models (no hidden reasoning tokens), so the
-// budget goes straight to the visible reply. The system prompt asks for
-// short, human-scale replies (mostly 1-3 sentences, ~60-120 tokens); 300 is
-// a generous ceiling that still caps runaway responses without mid-sentence
-// truncation.
-//
-// Keep this tight: generation time scales LINEARLY with tokens emitted
-// (Groq: Total = TTFT + output_tokens/speed + network), so every extra 100
-// tokens is ~0.2-0.5s of user-visible wait. 600 cost us ~1-2s extra on long
-// replies for zero quality gain on 1-3 sentence answers.
+// Replies are short (1-3 sentences), so 300 tokens caps runaways without
+// mid-sentence cuts. Generation time scales with tokens emitted, so this
+// stays tight for latency.
 const MAX_TOKENS = 300;
 const MAX_MESSAGE_LENGTH = 4000;
+// Bound on the legacy `messages[]` fallback so one request can't force the
+// server to scan an unbounded array.
+const MAX_LEGACY_MESSAGES = 50;
 
-// ---------------------------------------------------------------------------
-// Provider circuit breakers (per-instance, in-memory)
-//
-// Every request used to wait out the full primary timeout before even
-// STARTING the fallback — when OpenRouter degrades, the whole userbase
-// experiences ~2x latency and elevated 503s. The breaker remembers recent
-// failures per model on this instance: after N consecutive failures the
-// model is skipped for COOLDOWN_MS, then probed again (half-open). Inexact
-// across serverless instances, but it turns a provider outage from
-// "every request pays the timeout" into "most requests go straight to the
-// healthy provider".
-// ---------------------------------------------------------------------------
+// Provider circuit breakers (per-instance, in-memory). After N consecutive
+// failures a model is skipped for a cooldown, then probed again. Inexact
+// across serverless instances, but keeps one dead provider from taxing every
+// request with a full timeout.
 const BREAKER_THRESHOLD = 5;
 const BREAKER_COOLDOWN_MS = 60_000;
 
@@ -151,7 +118,7 @@ function getModelBreaker(name: string): BreakerState {
   return state;
 }
 
-/** True when the breaker is OPEN (skip this model). Half-open after cooldown. */
+/** True when the breaker is open (skip this model until cooldown passes). */
 function isModelSkipped(name: string): boolean {
   const state = getModelBreaker(name);
   if (state.openedAt === null) return false;
@@ -185,7 +152,7 @@ interface GroqAttempt {
   reply?: string;
 }
 
-/** Single completion attempt against a model target. Never throws — failures are returned. */
+/** Single completion attempt. Never throws — failures are returned. */
 async function callModel(
   target: ModelTarget,
   messages: { role: string; content: string }[],
@@ -193,8 +160,7 @@ async function callModel(
 ): Promise<GroqAttempt> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-  // Abort the fetch too when the client hangs up — no point paying for
-  // tokens for a reply nobody will read.
+  // Abort the fetch when the client hangs up — no paid tokens for an unread reply.
   const onClientGone = () => controller.abort();
   if (clientGoneSignal) {
     if (clientGoneSignal.aborted) controller.abort();
@@ -242,14 +208,9 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Never rejects — resolves { attempt, target } or null on failure.
- *
- * `releaseEarly` lets a queued attempt skip the rest of its delay the moment
- * an earlier attempt has DEFINITIVELY failed (network error, HTTP error, or
- * empty body). That removes the pointless dead time where a dead primary
- * errors in 200ms but the fallback still sat waiting for the full stagger.
- * A slow-but-healthy primary deliberately does NOT release the fallback —
- * that would double-bill tokens on every merely-sluggish request.
+ * Queued model attempt. Never rejects. `releaseEarly` lets a queued attempt
+ * skip its delay once an earlier attempt has definitively failed, so a dead
+ * primary fails over without the full stagger of dead air.
  */
 function startAttempt(
   target: ModelTarget,
@@ -274,7 +235,6 @@ function startAttempt(
   const wrapped: Promise<{ attempt: GroqAttempt; target: ModelTarget } | null> = wait.then(() =>
     run()
   );
-  // Absolute guarantee against unhandled rejections: attempts never reject.
   return wrapped.catch((error: unknown) => {
     console.error(`[chat] Attempt machinery error (${target.name}):`, error);
     return null;
@@ -295,12 +255,9 @@ function wantsStream(req: Request): boolean {
 }
 
 /**
- * Streams one completion attempt, forwarding tokens via onToken as they
- * arrive. Resolves with the full reply (or failure). Never throws.
- *
- * First-token latency is what the user FEELS: with `stream:true` Groq sends
- * the first token in ~300-600ms while the full 6s generation is still
- * running — the app renders progressively instead of staring at a spinner.
+ * Streams one completion attempt, forwarding tokens as they arrive.
+ * First token wins the race; the loser is aborted and never counts as a
+ * breaker failure. Never throws.
  */
 async function streamAttempt(
   target: ModelTarget,
@@ -350,8 +307,6 @@ async function streamAttempt(
     }
     const body = response.body;
     if (!body) {
-      // Provider ignored stream:true and returned no body — treat as failure
-      // so the caller can fall back to the buffered path.
       return { ok: false, status: response.status, errorData: 'empty stream body' };
     }
 
@@ -412,8 +367,7 @@ async function streamAttempt(
       }
     }
     // NOTE: no recordModelResult here — the streaming race aborts the loser
-    // mid-flight, and an aborted-healthy provider must NOT count as a
-    // breaker failure. The caller records results with race context.
+    // mid-flight, and an aborted-healthy provider must not count as failure.
     return { ok: full.length > 0, reply: full };
   } catch (error) {
     return { ok: false, status: undefined, errorData: error };
@@ -423,29 +377,17 @@ async function streamAttempt(
   }
 }
 
-/**
- * Sends a JSON response unless the socket is already gone (mobile clients
- * abort on ~10s read timeouts; writing to the dead socket is pointless).
- */
+/** Sends JSON unless the socket is already gone. */
 function sendJson(res: Response, status: number, payload: unknown): void {
   if (res.writableEnded || res.destroyed) return;
   res.status(status).json(payload);
 }
 
 export async function chatSendHandler(req: Request, res: Response): Promise<void> {
-  // Abort path when the client hangs up (mobile networks switch, apps get
-  // backgrounded). Without this, an abandoned request still runs to
-  // completion — paying for AI tokens and consuming the user's quota for a
-  // reply they never received.
-  //
-  // IMPORTANT: listen on the RESPONSE, not `req.socket`. On serverless
-  // runtimes (Vercel/Lambda) the request socket is a synthetic stream that
-  // emits 'close' as soon as the request body has been read — not when the
-  // client disconnects — so a `req.socket` listener aborts EVERY request
-  // before the AI call and the handler returns without ever writing a
-  // response (users saw a generic "try again later" while the logs stayed
-  // silent). `res` 'close' fires when the connection actually ends; a fully
-  // written response (`writableEnded`) is not a disconnect.
+  // Abort when the client hangs up so abandoned requests don't burn AI
+  // tokens or quota. Listens on the response: on serverless runtimes the
+  // request socket emits 'close' after the body is read (not on disconnect),
+  // so a req.socket listener would abort every request.
   const clientGone = new AbortController();
   const onResponseClose = () => {
     if (!res.writableEnded) clientGone.abort();
@@ -473,11 +415,15 @@ async function handleChatSend(
   };
 
   // --- Input validation (with legacy-app compatibility) ---
-  // Older app builds sent the raw Groq-style payload { messages: [...] }
-  // instead of { message: string }. Accept both: if `message` is missing,
-  // fall back to the content of the last message in the `messages` array.
+  // Older app builds sent { messages: [...] } instead of { message }. Accept
+  // both, using the latest user turn. Capped so a giant array can't be used
+  // to burn CPU parsing unbounded JSON.
   let rawMessage: unknown = body.message;
   if (typeof rawMessage !== 'string' && Array.isArray(body.messages) && body.messages.length > 0) {
+    if (body.messages.length > MAX_LEGACY_MESSAGES) {
+      sendJson(res, 400, { error: 'Too many messages in one request' });
+      return;
+    }
     const legacyMessages = body.messages as Array<{ role?: unknown; content?: unknown } | null>;
     // Legacy apps sent full alternating history — prefer the latest user turn.
     for (let i = legacyMessages.length - 1; i >= 0; i--) {
@@ -487,7 +433,7 @@ async function handleChatSend(
         break;
       }
     }
-    // No user-role entry found: fall back to the newest entry with content.
+   // No user-role entry: fall back to the newest entry with content.
     if (typeof rawMessage !== 'string') {
       for (let i = legacyMessages.length - 1; i >= 0; i--) {
         const entry = legacyMessages[i];
@@ -509,16 +455,13 @@ async function handleChatSend(
     return;
   }
 
-  // Legacy app payloads may not send a personality — default to Friend
-  // (the same fallback buildSystemPrompt uses). But an explicitly invalid
-  // personality is rejected (consistent with religionSubType) so clients get
-  // clear feedback instead of silently talking to a different persona.
+  // Personality: omitted defaults to Friend; explicitly invalid is rejected.
+  // "Guide_<religion>" (e.g. "Guide_hindu") selects Guide with that overlay.
   let personality: PersonalityType = 'Friend';
   let religionSubType: string | undefined =
     typeof body.religionSubType === 'string' ? body.religionSubType : undefined;
 
-  // Frontend compat: "Guide_<religion>" (e.g. "Guide_hindu") selects the Guide
-  // persona with that faith overlay in one field. Normalize it server-side.
+  // Frontend compat: "Guide_<religion>" selects Guide with that overlay.
   const guideAlias =
     typeof body.personality === 'string' && body.personality.startsWith('Guide_')
       ? body.personality
@@ -540,16 +483,8 @@ async function handleChatSend(
   if (guideAlias) {
     personality = 'Guide';
     const aliasReligion = guideAlias.slice('Guide_'.length).toLowerCase();
-    if (RELIGION_KEYS.includes(aliasReligion)) {
-      religionSubType = aliasReligion;
-    }
-    // Unknown Guide_<x> suffix: keep Guide without a faith layer (buildSystemPrompt
-    // already handles a missing/unknown subtype via its spiritual fallback). To
-    // stay strict about what reaches the system prompt, pass undefined when the
-    // suffix isn't a known religion key.
-    else {
-      religionSubType = undefined;
-    }
+    // Unknown suffix: plain Guide (buildSystemPrompt falls back to spiritual).
+    religionSubType = RELIGION_KEYS.includes(aliasReligion) ? aliasReligion : undefined;
   }
 
   // religionSubType is user input injected into the system prompt — allowlist only.
@@ -561,22 +496,15 @@ async function handleChatSend(
     religionSubType = religionSubType.toLowerCase();
   }
 
-  // Stranger is always anonymous and topic-only: faith overlays and any
-  // identity inference are dropped server-side so a client cannot smuggle
-  // them in via religionSubType.
+  // Stranger is anonymous and topic-only: faith overlays are dropped so a
+  // client can't smuggle them in.
   const isStranger = isStrangerPersonality(personality);
   if (isStranger) {
     religionSubType = undefined;
   }
 
-  // --- Server-side persona gating (the frontend UI lock is cosmetic) ---
-  // A 403 here must NOT consume quota and must NOT call any AI provider.
-  // Runs BEFORE the env guard so a locked persona reports persona_locked
-  // (403) even when provider keys are missing.
-  //
-  // Timing: t0 anchors per-stage breakdown logged with the reply, so the
-  // next "why is it slow" question is answered by data (Firestore vs
-  // provider vs network) instead of guesses.
+  // Persona gating runs before anything billable. A 403 consumes no quota
+  // and calls no provider.
   const t0 = Date.now();
   let planState: UserMessageState;
   try {
@@ -598,7 +526,7 @@ async function handleChatSend(
     return;
   }
 
-  // --- Env guard (fail with a clear error instead of a crash) ---
+  // --- Env guard ---
   const { PRIMARY, FALLBACK } = getModelTargets();
   if (!PRIMARY.apiKey && !FALLBACK.apiKey) {
     console.error(`[chat uid=${uid}] Missing OPENROUTER_API_KEY and GROQ_API_KEY env vars`);
@@ -606,19 +534,12 @@ async function handleChatSend(
     return;
   }
 
-  // --- Quota gate (fail fast BEFORE spending AI money) ---
-  // getPlanState already returned the window-adjusted count, so enforce the
-  // limit here for an instant 429. The old flow generated a full AI reply
-  // and THEN 429-ed in consumeMessage — burning provider tokens and making
-  // an exhausted user wait seconds for a rejection. Same numbers, same
-  // shape ({ limitReached, nextRefreshAt }), just enforced up front; the
-  // post-reply consume below is then pure accounting.
+  // --- Quota gate (before spending AI money) ---
   const quotaConfig = PLAN_CONFIG[planState.plan];
   if (planState.messageCount >= quotaConfig.limit) {
     sendJson(res, 429, {
       limitReached: true,
       nextRefreshAt: planState.lastResetAt + quotaConfig.refreshMs,
-      // Quota exhausted: refill countdown is always surfaced (100% used).
       showRefillTimer: true,
       messagesUsed: Math.max(0, planState.messageCount),
       messagesTotal: quotaConfig.limit,
@@ -627,12 +548,8 @@ async function handleChatSend(
     return;
   }
 
-  // --- Attestation + throttles, IN PARALLEL ---
-  // These three are independent (App Check verify, per-IP Firestore counter,
-  // per-uid rate-limit counter), so awaiting them sequentially stacked
-  // ~200-400ms EACH onto every message. Promise.all pays only the slowest
-  // one (~one Firestore round-trip). They run AFTER persona gating so a
-  // 403 never burns rate-limit quota.
+  // --- Attestation + throttles (independent, so run in parallel) ---
+  // They run after persona gating so a 403 never burns rate-limit budget.
   const appCheckEnabled = isAppCheckEnforced();
   const throttleIp = extractClientIp(req);
   const [appCheckResult, ipThrottleResult, abuseLimitResult] = await Promise.all([
@@ -660,11 +577,7 @@ async function handleChatSend(
   ]);
   const tChecks = Date.now();
 
-  // --- Device attestation (opt-in; see appCheckService.ts) ---
-  // Creating Firebase accounts is free, so uid-keyed quotas alone cannot cap
-  // the AI bill: one script can farm thousands of accounts. When
-  // ENABLE_APP_CHECK=true, invalid App Check tokens are rejected and missing
-  // tokens fall through to the (much tighter) IP throttle below.
+  // --- Device attestation (opt-in) ---
   if (appCheckEnabled) {
     if (
       appCheckResult !== null &&
@@ -686,16 +599,13 @@ async function handleChatSend(
     }
   }
 
-  // --- Per-IP throttle: caps free-signup farming from one address ---
-  // Independent of (and in addition to) the per-uid limit below. See
-  // chatClientThrottle.ts for why it is IP-based and what the limits mean.
+  // --- Per-IP throttle (caps farming across fresh accounts) ---
   if (ipThrottleResult instanceof RateLimitExceededError) {
     sendJson(res, 429, {
       limitReached: true,
       error: 'Too many requests, try again later',
       code: 'ip_rate_limited',
       nextRefreshAt: Date.now() + ipThrottleResult.retryAfterMs,
-      // Abuse throttle, not quota exhaustion: never show the quota refill UI.
       showRefillTimer: false,
     });
     return;
@@ -704,16 +614,12 @@ async function handleChatSend(
     console.error('[chat] IP throttle check failed (allowing request):', ipThrottleResult);
   }
 
-  // --- Abuse rate limit (independent of the plan message quota) ---
-  // Fail-open on limiter storage errors (consistent with the payment
-  // limiters): availability beats throttling when the limiter itself is
-  // broken — plan quota below still caps usage.
+  // --- Abuse rate limit (fail-open; plan quota still caps usage) ---
   if (abuseLimitResult instanceof RateLimitExceededError) {
     sendJson(res, 429, {
       limitReached: true,
       error: 'Too many requests, try again later',
       nextRefreshAt: Date.now() + abuseLimitResult.retryAfterMs,
-      // Abuse throttle, not quota exhaustion: never show the quota refill UI.
       showRefillTimer: false,
     });
     return;
@@ -728,12 +634,7 @@ async function handleChatSend(
     { role: 'user' as const, content: trimmed },
   ];
 
-  // --- Streaming fast path (progressive render) ---
-  // ?stream=1 (or Accept: text/event-stream). First token reaches the client
-  // in ~0.5s while generation continues — a 6s reply becomes "already
-  // reading" instead of "staring at a spinner". Backward compatible: the
-  // default path below keeps the exact buffered JSON shape, so existing
-  // apps and all tests are untouched until the frontend opts in.
+  // --- Streaming fast path (?stream=1 or SSE accept) ---
   if (wantsStream(req)) {
     await handleStreamedChat(res, {
       uid,
@@ -751,34 +652,18 @@ async function handleChatSend(
     return;
   }
 
-  // --- Race primary and fallback STAGGERED IN PARALLEL ---
-  // First success wins: the fallback starts CHAT_FALLBACK_STAGGER_MS after the
-  // primary, so a slow-but-healthy primary can still win, but a HUNG primary
-  // never blocks a fast fallback (the old sequential `for await` waited out
-  // the full AI_TIMEOUT_MS on primary even when fallback had already
-  // succeeded — mobile clients abort ~10s and saw "AI not responding").
-  //
-  // The stagger is small (500ms) so the fallback still lands inside the
-  // user's patience window; it is not near-zero because firing the fallback
-  // on EVERY request would double-bill tokens when the primary is merely a
-  // little slow.
-  //
-  // And when the primary fails FAST (bad key, 5xx, network error) the
-  // fallback doesn't wait out the stagger at all — it is released the moment
-  // the primary settles without a reply, so a dead primary costs the user
-  // only the provider's error time, not 500ms of dead air on top of it.
+  // --- Race primary and fallback, staggered ---
+  // First success wins. The fallback starts CHAT_FALLBACK_STAGGER_MS after
+  // the primary (or immediately on a definitive primary failure), so a hung
+  // primary never blocks a fast fallback.
   const targetsToTry = PRIMARY.model === FALLBACK.model ? [PRIMARY] : [PRIMARY, FALLBACK];
 
   const candidates = targetsToTry.filter((t) => t.apiKey && !isModelSkipped(t.name));
-  // If every candidate is breaker-open, still try (half-open probes resolve
-  // this naturally on the next cooldown expiry, but never return 503 without
-  // at least one real attempt).
+  // Every candidate breaker-open: still try rather than 503 without an attempt.
   const queued = candidates.length > 0 ? candidates : targetsToTry.filter((t) => t.apiKey);
 
-  // Resolves when the leading attempt has definitively failed. Later attempts
-  // race their stagger against this so a fast failure fails over immediately.
-  // The executor runs synchronously, so `releaseFallback` is assigned before
-  // anything can read it.
+  // Resolves when the leading attempt has definitively failed, so the
+  // fallback skips the rest of its stagger on a fast primary failure.
   let releaseFallback: (() => void) | null = null;
   const fallbackReleased = new Promise<void>((resolve) => {
     releaseFallback = resolve;
@@ -792,8 +677,7 @@ async function handleChatSend(
       clientGoneSignal,
       index === 0 ? undefined : fallbackReleased
     );
-    // The first attempt is the one that gates the fallback: release it only
-    // on a real failure, never on success (which would waste tokens).
+    // Release the fallback only on real failure, never on success.
     if (index === 0) {
       void attemptPromise.then((result) => {
         if (attemptFailed(result)) releaseFallback?.();
@@ -806,10 +690,6 @@ async function handleChatSend(
   let usedTarget: ModelTarget | null = null;
   if (attempts.length > 0 && !clientGoneSignal.aborted) {
     type AttemptResult = { attempt: GroqAttempt; target: ModelTarget } | null;
-    // Worst case: the last attempt starts at (n-1) x stagger and may itself
-    // run the full timeout. Keep this equal to the real abort point — a
-    // tighter deadline only risks 503-ing an attempt that was about to
-    // succeed, so lower AI_TIMEOUT_MS itself when latency must drop.
     const deadlineMs = AI_TIMEOUT_MS + CHAT_FALLBACK_STAGGER_MS * (attempts.length - 1) + 500;
     const firstSuccess = new Promise<AttemptResult>((resolve) => {
       let settledFailures = 0;
@@ -849,17 +729,13 @@ async function handleChatSend(
     });
   }
 
-  // The client (or its proxy) gave up — do not consume quota, do not attempt
-  // to deliver. Return quietly; the socket is already closed.
+  // Client gave up — no quota consumed, nothing to deliver.
   if (clientGoneSignal.aborted) {
     console.warn(`[chat uid=${uid}] Client disconnected before reply — not consuming quota`);
     return;
   }
 
   if (!reply) {
-    // Log synchronously BEFORE responding: the detached observability chain
-    // below may not flush before a serverless instance freezes, and a silent
-    // 503 is what made this look like "users fail but logs are clean".
     console.error(
       `[chat uid=${uid}] No reply from any provider (attempts=${attempts.length}) — returning 503 ai_upstream_error`
     );
@@ -876,29 +752,18 @@ async function handleChatSend(
 
   sendJson(res, 200, {
     reply,
-    // Echo back the effective persona so clients can confirm what was used.
     personality,
     religionSubType: religionSubType ?? null,
-    // Stranger contract: anonymous, topic-only, no persistence. Clients must
-    // not store these turns locally or in Firestore, must not show a named
-    // persona header, and must not feed prior turns as history.
     ...(isStranger
       ? { isStranger: true, anonymous: true, storeHistory: false, noHistory: true }
       : {}),
-    // Legacy app builds parse the raw OpenAI-style shape
-    // (data.choices[0].message.content) instead of data.reply — return both
-    // so old and new app versions both work.
+    // Legacy OpenAI-style shape alongside `reply` for old app builds.
     choices: [{ message: { role: 'assistant' as const, content: reply } }],
   });
 
-  // AI responded successfully — persist quota BEFORE the handler returns.
-  // The reply above is already flushed, so TTFB is unaffected; but the write
-  // MUST be awaited. The previous `void consumeMessage(...)` fire-and-forget
-  // let Vercel freeze the instance the moment the response ended, silently
-  // dropping the increment — users saw "no messages are being registered"
-  // and the 75% refill countdown never appeared. Awaiting here keeps the
-  // function alive just long enough to guarantee accounting. The pre-AI quota
-  // gate above still provides the instant 429; this is pure accounting.
+  // Quota is persisted after the reply is flushed (TTFB unaffected) but
+  // awaited — otherwise serverless freeze can drop the increment. The
+  // pre-AI gate above is the instant 429; this is pure accounting.
   try {
     await consumeMessage(uid);
   } catch (error: unknown) {
@@ -925,20 +790,11 @@ interface StreamContext {
 }
 
 /**
- * Token-streaming variant of the chat race (see wantsStream).
- *
- * Protocol (SSE, `data: <json>` per event):
- *   { token: "..." }   — one per generated chunk, append to the bubble
- *   { done: true, reply, personality, choices } — full reply + metadata
- *   [DONE]              — stream terminator (OpenAI convention)
- *   { error, code }     — headers already sent as 200, so failures arrive
- *                         as an event, not a status code
- *
- * Race rules mirror the buffered path: the fallback starts CHAT_FALLBACK_
- * STAGGER_MS after the primary ONLY if the primary hasn't produced a first
- * token yet (healthy primary = zero double-bill), or immediately on a
- * definitive primary failure. First token wins; the loser is aborted and —
- * critically — never recorded as a breaker failure.
+ * Token-streaming variant. Events: { token } per chunk, then
+ * { done, reply, personality, choices }, then [DONE]. Failures arrive as an
+ * { error, code } event (headers already sent as 200). Race rules mirror the
+ * buffered path: first token wins, the loser is aborted and not recorded as
+ * a breaker failure.
  */
 async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<void> {
   const { uid, personality, religionSubType, isStranger, messages } = ctx;
@@ -962,8 +818,6 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  // Flush headers NOW so the client's first-token clock starts before the
-  // provider round-trip, not after it.
   const flushable = res as unknown as { flushHeaders?: () => void };
   if (typeof flushable.flushHeaders === 'function') flushable.flushHeaders();
 
@@ -1048,8 +902,8 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
     let fallbackPromise: Promise<GroqAttempt & { target: ModelTarget }> | null = null;
     if (slots[1]) {
       const fallbackSlot = slots[1];
-      // Wait for the stagger — unless the primary already won (first token)
-      // or definitively failed (fail fast, no dead air).
+      // Start the fallback on stagger expiry or definitive primary failure —
+      // never once the primary is already streaming.
       const gate = await Promise.race([
         delay(CHAT_FALLBACK_STAGGER_MS).then(() => 'stagger' as const),
         firstTokenPromise.then(() => 'settled' as const),
@@ -1058,8 +912,8 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
       if (gate === 'stagger' && winner === null && !clientGoneSignal.aborted) {
         fallbackPromise = runSlot(fallbackSlot);
       } else if (gate === 'settled' && winner === null && !clientGoneSignal.aborted) {
-        // Primary settled without a first token = definitive failure: record
-        // it and start the fallback NOW instead of waiting out the stagger.
+        // Primary failed without a first token: record it and start the
+        // fallback now instead of waiting out the stagger.
         const primaryResult = await primaryPromise;
         recordModelResult(primarySlot.target.name, false);
         if (!primaryResult.ok) {
@@ -1069,8 +923,8 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
         }
         fallbackPromise = runSlot(fallbackSlot);
       }
-      // else: primary already streaming tokens — fallback never starts.
-    }
+      // else: primary already streaming — fallback never starts.
+      }
 
     const deadlineMs =
       AI_TIMEOUT_MS + CHAT_FALLBACK_STAGGER_MS * (slots.length - 1) + 500;
@@ -1094,12 +948,25 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
     }
 
     if (clientGoneSignal.aborted) {
-      console.warn(`[chat uid=${uid}] Client disconnected mid-stream — not consuming quota`);
+      // Tokens were already streamed (provider billed, user saw value), so
+      // the quota still counts — otherwise aborts after the first token
+      // would farm free previews.
+      if (fullReply) {
+        try {
+          await consumeMessage(uid);
+        } catch (error: unknown) {
+          if (!(error instanceof LimitReachedError)) {
+            console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
+          }
+        }
+      } else {
+        console.warn(`[chat uid=${uid}] Client disconnected mid-stream — not consuming quota`);
+      }
       return;
     }
 
-    // Breaker bookkeeping with race context: the winner counts as success;
-    // a started-but-tokenless loser aborted BY THE RACE is not a failure.
+    // Breaker bookkeeping with race context: winner counts as success; a
+    // loser aborted by the race is not a failure.
     const won = winner as ModelTarget | null;
     if (!fullReply || won === null) {
       console.error(
@@ -1123,12 +990,9 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
         `ttft=${ttft}ms total=${tAi - ctx.t0}ms`
     );
 
-    // Quota was already enforced by the pre-AI gate. Persist it BEFORE
-    // closing the stream so the write is guaranteed even on serverless
-    // (same Vercel-freeze bug as the buffered path). Tokens already
-    // streamed progressively, so this only delays the final `done` event
-    // by one Firestore write — and the next GET /api/user/usage then sees
-    // the correct count immediately.
+    // Persist quota before closing the stream so serverless freeze can't
+    // drop the write. Tokens already streamed, so this only delays `done`
+    // by one Firestore write.
     try {
       await consumeMessage(uid);
     } catch (error: unknown) {

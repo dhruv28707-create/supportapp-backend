@@ -1,18 +1,10 @@
 import { Request } from 'express';
 
 /**
- * Best-effort client IP extraction for abuse throttling.
- *
- * Trust order (anti-spoof):
- *  1. `x-vercel-forwarded-for` — set by Vercel's edge, not client-spoofable
- *     in production. Trusted first.
- *  2. `req.ip` / socket address — the direct peer.
- *  3. `x-forwarded-for` left-most — attacker-controlled; only trusted when
- *     TRUST_FORWARDED_HEADERS=true (local dev behind a proxy). In production
- *     it is IGNORED so an attacker cannot rotate it per request for a fresh
- *     throttle bucket.
- *
- * Only used for rate limiting — never for auth or identity decisions.
+ * Best-effort client IP for abuse throttling (never for auth/identity).
+ * Trusts x-vercel-forwarded-for (edge-set) first, then the direct peer.
+ * x-forwarded-for is attacker-controlled, so it's only honored with
+ * TRUST_FORWARDED_HEADERS=true (local dev behind a proxy).
  */
 export function extractClientIp(req: Request): string | null {
   const vercel = req.headers['x-vercel-forwarded-for'];

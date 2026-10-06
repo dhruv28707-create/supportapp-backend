@@ -20,29 +20,12 @@ export interface RateLimitResult {
  * Sliding-window rate limiter backed by Firestore, so it works across
  * serverless instances. Throws RateLimitExceededError when the limit is hit.
  *
- * Concurrency design (why this is NOT a runTransaction):
+ * Non-transactional by design: one read plus one server-side increment(1),
+ * never a read-write transaction (those serialize per doc and collapse under
+ * burst load). A hard concurrent burst can briefly overshoot `max` — fine
+ * for an abuse backstop, since plan quota still caps usage.
  *
- * The previous implementation read+wrote the counter doc inside a
- * transaction. Firestore serializes transactions that touch the same
- * document (~1 write/sec/doc soft cap), so a user sending a burst of chat
- * messages had every request contending on `rateLimits/chat:<uid>`:
- * transactions retried, latency climbed, and under sustained bursts requests
- * failed with 500s even though plenty of quota remained.
- *
- * This version does one deterministic read followed by one non-transactional
- * increment(1). Firestore applies increments server-side and atomically, so
- * the count is always correct, and because it is not a transaction it never
- * retries or contends — throughput per counter doc is effectively the
- * machine limit, not Firestore's transaction rate.
- *
- * Trade-off: under a hard concurrent burst the counter can briefly overshoot
- * `max` (each request decides from the pre-increment snapshot). For an abuse
- * backstop that is acceptable — the plan quota still caps usage — and the
- * limiter remains fail-open on storage errors like before.
- *
- * Approximate cost: 1 read + 1 write per call, one round trip (the read is
- * fired first and awaited; the write is sent without waiting for its ack
- * because the decision was already made — increment cannot fail "denied").
+ * Fail-open on storage errors (set RATE_LIMIT_FAIL_CLOSED=true to deny).
  */
 export async function consumeRateLimit(
   key: string,

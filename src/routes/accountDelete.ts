@@ -13,27 +13,11 @@ const RATE_LIMIT_MAX = 3;
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 
 /**
- * DELETE /api/account
- *
- * Deletes the authenticated user's server-side data and revokes
- * their Firebase tokens (existing ID tokens stop working within minutes).
- *
- * The full server-side wipe covers: the subscriptions/{uid} doc, the
- * users/{uid} profile doc, chat history (shape auto-discovered, or forced
- * via CHAT_COLLECTIONS), pending payment orders (paid rows anonymized),
- * rate-limit counters, and the Firebase Auth account. The app must NOT do
- * its own Firestore cleanup first — old versions did and now fail with
- * [firestore/permission-denied] because the security rules no longer allow
- * client writes to those collections.
- *
- * - Ownership is implied by auth: uid comes from the VERIFIED Firebase ID
- *   token, never from the body/query. There is no way for one user to
- *   delete another user's data.
- * - An active paid subscription blocks deletion (409) — deletion must not
- *   be a way to silently walk away from a paid term. The user must cancel
- *   / let it expire, or contact support for refunds per the app's policy.
- * - Best-effort cleanup: a partial failure is logged but deletion still
- *   proceeds to token revocation, so the account always ends up unusable.
+ * DELETE /api/account — wipes the user's server-side data (subscription,
+ * profile, chats, pending orders, rate-limit counters; paid rows anonymized)
+ * and revokes Firebase tokens plus the Auth account. An active paid term
+ * blocks deletion (409); cancel or let it expire first. Best-effort: partial
+ * failures are logged but deletion still proceeds to token revocation.
  */
 export async function deleteAccountHandler(
   req: AuthenticatedRequest,
@@ -51,10 +35,8 @@ export async function deleteAccountHandler(
     console.error('[delete-account] Rate limit check failed:', error);
   }
 
-  // The 409 subscription-block check must never take the whole request down:
-  // if the Firestore read itself fails (service-account IAM, transient
-  // outage, …), we log and continue best-effort instead of returning 500 —
-  // the user still has the right to have their account deleted.
+  // The subscription check must never take the request down: on a Firestore
+  // failure we log and continue best-effort instead of returning 500.
   let activeExpiry: string | null = null;
   try {
     activeExpiry = await getActiveSubscriptionExpiry(uid);
@@ -66,8 +48,6 @@ export async function deleteAccountHandler(
   }
 
   if (activeExpiry) {
-    // 409 Conflict: the account has a live paid term. The client should
-    // tell the user to cancel first / contact support for refunds.
     res.status(409).json({
       error:
         'Your subscription is still active. Cancel it or contact support before deleting your account.',
@@ -80,18 +60,17 @@ export async function deleteAccountHandler(
   try {
     const requestStartedAt = Date.now();
 
-    // Token revocation is independent of the Firestore wipe — start both at
-    // once. (Auth for THIS request was already verified before the handler
-    // ran, so revoking mid-request cannot invalidate our own invocation.)
+    // Revocation is independent of the Firestore wipe — run both at once.
+    // (Auth for this request was already verified, so mid-request revocation
+    // can't invalidate our own invocation.)
     const dataCleanupPromise = deleteAccountData(uid);
     const tokensRevoked = await revokeUserTokens(uid);
     const summary = await dataCleanupPromise;
 
     const totalDataMs = Date.now() - requestStartedAt;
 
-    // Loud signal when nothing could be cleaned up server-side — usually
-    // means the service account lacks Firestore IAM (Cloud Datastore User),
-    // NOT a security-rules problem: the Admin SDK bypasses the rules.
+    // Loud signal when nothing was removed — usually missing Firestore IAM
+    // on the service account (Admin SDK bypasses rules, so this isn't rules).
     if (
       !summary.subscriptionDeleted &&
       !summary.userDocDeleted &&
@@ -106,13 +85,8 @@ export async function deleteAccountHandler(
       );
     }
 
-    // (Refresh-token revocation already ran concurrently above, so every
-    // issued ID token is dying even if the remaining steps were to fail.)
-
-    // Best-effort removal of the Firebase Auth account itself. The frontend
-    // may have already called currentUser.delete() — that's fine; this is
-    // the server-side guarantee that it happened (or that at least the
-    // tokens are dead and data is gone).
+    // Best-effort Auth account removal. The frontend may have already
+    // deleted client-side; user-not-found then counts as success.
     let firebaseAuthDeleted = false;
     try {
       await auth.deleteUser(uid);
@@ -120,7 +94,6 @@ export async function deleteAccountHandler(
     } catch (error) {
       const code = (error as { code?: string }).code;
       if (code === 'auth/user-not-found') {
-        // Already deleted client-side (currentUser.delete()) or never existed.
         firebaseAuthDeleted = true;
       } else {
         console.error(`[delete-account] Firebase Auth delete failed for uid=${uid.slice(0, 8)}:`, error);

@@ -1,14 +1,8 @@
 /**
- * Chat-history storage discovery for the account-deletion purge.
- *
- * The backend is stateless (chat context lives client-side), so chat history
- * in Firestore is written by the app. Its shape is not declared anywhere in
- * this repo, so instead of guessing one fixed schema the purge walks a small
- * set of well-known shapes (see CHAT_STORAGE_SHAPES below) and also accepts
- * explicit overrides via the CHAT_COLLECTIONS env var (comma-separated).
- *
- * Nothing here reads or returns message content: only collection/doc ids and
- * field names are surfaced, and only for the deleting user's own data.
+ * Chat-history discovery for the account-deletion purge. Chat context lives
+ * client-side, so history in Firestore is app-written in an unknown shape —
+ * the purge walks well-known shapes plus CHAT_COLLECTIONS overrides. Only
+ * ids/field names are surfaced, never message content.
  */
 
 import { db } from '../config/firebaseAdmin';
@@ -49,9 +43,7 @@ export function getChatCollectionsOverride(): string[] {
 
 /** All subcollection ids directly under users/{uid}. */
 export async function listUserDocSubcollections(uid: string): Promise<string[]> {
-  // Throw on failure (don't swallow to []): the caller counts it as
-  // docsFailed so residual Shape-C data is VISIBLE in logs/summary instead
-  // of silently surviving deletion (GDPR risk).
+  // Throw on failure so the caller counts it (residual data stays visible).
   const snap = await db.collection('users').doc(uid).listCollections();
   return snap.map((c) => c.id);
 }

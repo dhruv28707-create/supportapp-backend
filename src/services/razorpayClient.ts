@@ -2,30 +2,21 @@ import axios from 'axios';
 import Razorpay from 'razorpay';
 
 /**
- * Timeout for Razorpay API calls. The Razorpay SDK wraps axios, which
- * defaults to NO timeout (timeout: 0) — a stalled upstream call would hang
- * until the hosting platform kills the function (Vercel maxDuration = 60s),
- * which users experience as endless buffering before the checkout opens.
- * Mirror the 10s budget used for Groq calls so payments fail fast with a
- * clear error instead.
+ * Razorpay client with a 10s call budget. The SDK's axios instance defaults
+ * to no timeout, which would hang until the platform kills the function.
  */
 export const RAZORPAY_TIMEOUT_MS = 10000;
 
 function buildClient(): Razorpay {
   const key_id = process.env.RAZORPAY_KEY_ID;
   const key_secret = process.env.RAZORPAY_KEY_SECRET;
-  // Descriptive (not `process.env.X!`): the old non-null assertion crashed
-  // cold-start imports with an inscrutable TypeError. This throws a clear
-  // error only when the client is actually USED without keys.
   if (!key_id || !key_secret) {
     throw new Error(
       'Missing RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET environment variables — payments are disabled'
     );
   }
-  // The SDK builds its axios instance inside `new Razorpay(...)` and merges
-  // axios' global defaults into it. Set the default timeout ONLY around the
-  // construction, then restore — the old code mutated the GLOBAL axios
-  // defaults permanently, throttling every other axios client in the process.
+  // The SDK merges axios global defaults into its own instance at
+  // construction, so set the timeout only around `new Razorpay(...)`.
   const previousTimeout = axios.defaults.timeout;
   axios.defaults.timeout = RAZORPAY_TIMEOUT_MS;
   try {
@@ -35,9 +26,8 @@ function buildClient(): Razorpay {
   }
 }
 
-// Lazy singleton via Proxy: keys are read on first USE (not import), so tests
-// can vi.stubEnv AFTER import and production gets a clear error only when
-// payments are actually attempted without keys.
+// Lazy singleton via Proxy: keys are read on first use, not import, so env
+// stubs and rotation take effect without a restart.
 let cached: Razorpay | null = null;
 function real(): Razorpay {
   if (!cached) cached = buildClient();

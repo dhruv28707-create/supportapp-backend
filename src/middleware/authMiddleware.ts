@@ -6,15 +6,10 @@ export interface AuthenticatedRequest extends Request {
 }
 
 /**
- * Retries for the signup race: a brand-new user's ID token is issued
- * immediately by the client SDK, but `verifyIdToken(token, true)` must fetch
- * the user record from the Auth backend to enforce revocation — and for a
- * just-created account that lookup can briefly hit a replica that does not
- * have the user yet, throwing `auth/user-not-found`. The JWT itself is valid;
- * only the record is lagging. A couple of short retries closes that window.
- *
- * Every OTHER failure (bad signature, malformed token, expired, revoked) is
- * permanent w.r.t. this request and fails fast with no retry.
+ * Signup race retries: a brand-new user's token can arrive before the Auth
+ * backend replica has the user record (verifyIdToken with checkRevoked
+ * throws auth/user-not-found). The JWT itself is valid, so retry twice.
+ * Every other failure fails fast.
  */
 const USER_NOT_FOUND_RETRY_DELAYS_MS = [250, 600];
 
@@ -76,11 +71,8 @@ export async function authMiddleware(
   } catch (error) {
     const code = firebaseErrorCode(error);
     if (code) {
-      // Expected auth failures (bad token, expired, revoked, or a user record
-      // that genuinely does not exist anymore, e.g. a stale session after
-      // account deletion). Warn-level with the code — no stack spam — and a
-      // machine-readable `code` in the body so the client can react
-      // (e.g. auto-sign-out on auth/user-not-found).
+      // Expected auth failure (bad/expired/revoked token, deleted user).
+      // The `code` lets the client react (e.g. sign out on user-not-found).
       console.warn(`[auth] Token verification failed: ${code}`);
       res.status(401).json({ error: 'Unauthorized', code });
       return;

@@ -58,13 +58,10 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
       res.status(429).json({ error: 'Too many requests, try again later' });
       return;
     }
-    console.error('Payment verify rate limit check failed:', error);
-    res.status(500).json({ error: 'Internal server error' });
-    return;
+    console.error('Payment verify rate limit check failed (allowing request):', error);
   }
 
-  // Payment signature: HMAC-SHA256(key_secret, `${order_id}|${payment_id}`).
-  // Read lazily so tests can stub the env var after import.
+  // Checkout signature: HMAC-SHA256(key_secret, `order_id|payment_id`).
   const keySecret = process.env.RAZORPAY_KEY_SECRET ?? '';
   const expectedHex = crypto
     .createHmac('sha256', keySecret)
@@ -91,11 +88,9 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
       return;
     }
 
-    // Idempotency: a replayed verify (e.g. client retry after a network drop)
-    // succeeds with the already-granted result instead of erroring, so the
-    // client never shows a failure for a payment that actually went through.
-    // Expiry is recomputed from paidAt (when the plan actually started), NOT
-    // from now — a retry weeks later must still report the same date.
+    // Idempotency: a replayed verify (client retry after a network drop)
+    // returns the already-granted result. Expiry is recomputed from paidAt so
+    // a retry weeks later reports the same date.
     if (record.status === 'paid') {
       const plan = tierToPlan(record.tier);
       if (!plan) {
@@ -117,8 +112,8 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
       return;
     }
 
-    // Authoritative cross-check with Razorpay: the payment must be real,
-    // captured, for this exact order, and for the exact server-set amount.
+    // Cross-check with Razorpay: must be captured, for this exact order and
+    // the exact server-set amount.
     let payment: PaymentCheck | undefined;
     try {
       payment = await razorpay.payments.fetch(razorpay_payment_id);

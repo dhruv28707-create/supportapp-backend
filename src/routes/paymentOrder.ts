@@ -3,11 +3,18 @@ import { db } from '../config/firebaseAdmin';
 import { TIER_PRICES, Tier } from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { consumeRateLimit, RateLimitExceededError } from '../services/rateLimitService';
+import { enforceOrderIpThrottle } from '../services/chatClientThrottle';
+import { extractClientIp } from '../utils/request';
 import { razorpay } from '../services/razorpayClient';
 import { PAYMENTS_COLLECTION } from '../services/subscriptionService';
 
 const ORDER_RATE_LIMIT_MAX = 10;
 const ORDER_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+
+// Unpaid orders pile up if a client mints orders without checking out.
+// Cap them per user so one account can't flood the collection (or Razorpay)
+// with orphan orders.
+const MAX_PENDING_ORDERS = 5;
 
 export async function paymentOrderHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
   // uid comes from the verified Firebase token — never from the request body.
@@ -15,7 +22,7 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
 
   const { tier } = (req.body || {}) as { tier?: unknown };
 
-  // Tier must be a known key; price is resolved server-side, never client-side.
+  // Tier allowlisted; price resolved server-side, never from the client.
   if (typeof tier !== 'string' || !(TIER_PRICES as Record<string, number>)[tier]) {
     res.status(400).json({ error: 'Invalid tier' });
     return;
@@ -23,10 +30,8 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
 
   const startedAt = Date.now();
 
-  // Throttle FIRST, before touching Razorpay: the old order (create order,
-  // then consume) let a forged client mint unlimited Razorpay orders + orphan
-  // `pending` docs. Burning 1 slot of 10/10min on a failed Razorpay call is
-  // acceptable; unbounded order creation is not.
+  // Throttle first, before touching Razorpay — otherwise a script can mint
+  // unlimited orders plus orphan pending docs.
   try {
     await consumeRateLimit(
       `payment-order:${uid}`,
@@ -38,9 +43,40 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
       res.status(429).json({ error: 'Too many requests, try again later' });
       return;
     }
-    console.error('[payment-order] Rate limit check failed:', error);
-    res.status(500).json({ error: 'Internal server error' });
-    return;
+    console.error('[payment-order] Rate limit check failed (allowing request):', error);
+  }
+
+  // Per-IP cap: per-uid limits alone can't stop order minting across fresh
+  // accounts from one address.
+  const ip = extractClientIp(req);
+  if (ip) {
+    try {
+      await enforceOrderIpThrottle(ip);
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        res.status(429).json({ error: 'Too many requests, try again later' });
+        return;
+      }
+      console.error('[payment-order] IP throttle check failed (allowing request):', error);
+    }
+  }
+
+  // Pending-order cap: finish or abandon existing orders before minting more.
+  try {
+    const pending = await db
+      .collection(PAYMENTS_COLLECTION)
+      .where('uid', '==', uid)
+      .get();
+    let pendingCount = 0;
+    for (const doc of pending.docs) {
+      if (doc.data()?.status === 'pending') pendingCount += 1;
+    }
+    if (pendingCount >= MAX_PENDING_ORDERS) {
+      res.status(429).json({ error: 'Too many pending orders. Complete or wait before creating another.' });
+      return;
+    }
+  } catch (error) {
+    console.error('[payment-order] Pending-order check failed (allowing request):', error);
   }
 
   try {
@@ -67,9 +103,7 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
       orderId: order.id,
       amount: order.amount,
       currency: 'INR',
-      // Public checkout key (key_id — never the secret). Returning it lets
-      // the app open checkout with the exact key the order was created with,
-      // so a stale/hardcoded/mismatched key can never break the checkout.
+      // Public checkout key (never the secret).
       keyId: process.env.RAZORPAY_KEY_ID,
     });
   } catch (error) {
@@ -77,9 +111,8 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
       res.status(429).json({ error: 'Too many requests, try again later' });
       return;
     }
-    // Log every field we can get — the SDK throws plain objects on API
-    // errors and confusing TypeErrors on timeouts, so a single serialization
-    // strategy hides the real cause. This makes Vercel logs actionable.
+    // The SDK throws plain objects on API errors and TypeErrors on timeouts,
+    // so log every field available.
     const err = error as {
       message?: string;
       code?: string;

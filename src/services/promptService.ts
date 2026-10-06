@@ -3,20 +3,9 @@ import { PERSONALITIES } from '../constants';
 type Personality = (typeof PERSONALITIES)[number];
 
 /**
- * Prompt design (why it looks like this):
- *
- * 1. Each persona gets its own VOICE PRINT — disposition plus concrete speech
- *    mechanics — so twelve personas don't collapse into one generic voice.
- * 2. A shared HUMAN_RULES block replaces the old rigid suffix. The old suffix
- *    forced every reply through "validate -> advise -> end with a question,
- *    2-4 sentences" which read as a therapist-bot template.
- * 3. Faith overlays are deliberately light: weave at most one reference in,
- *    only when it fits, conversational — never a citation dump / sermon.
- *
- * When editing, keep personas concrete (how they TALK, not how they feel
- * about the user) and keep example phrases minimal — models overuse any
- * catchphrase you hand them, which is how the old stock-phrase problem
- * started. Describe manner instead of scripting lines.
+ * Persona prompts. Each persona gets its own voice; a shared HUMAN_RULES
+ * block keeps replies short and human instead of templated. Faith overlays
+ * for Guide stay light — at most one small reference, only when it fits.
  */
 
 const BASE_PROMPTS: Record<Personality, string> = {
@@ -63,9 +52,8 @@ How you talk — this is what makes you sound human:
 - Never invent detailed fake shared memories; you may reference your history loosely ("like always", "you know how you get").`;
 
 /**
- * Faith overlays for the Guide persona. Kept deliberately light: each one
- * names the flavor and the tone, not a citation bank. The injection site in
- * buildSystemPrompt enforces "max one small reference, only when it fits".
+ * Faith overlays for the Guide persona. Tone notes only — the injection
+ * below caps usage at one small reference.
  */
 const RELIGION_GUIDANCE: Record<string, string> = {
   islamic: `Fold Islamic comfort in gently, the way a close friend would mention it — only when it truly fits. Your touchstones: tawakkul (trust in Allah's plan), sabr through hardship, Allah's mercy and closeness. Use words like InshaAllah or Alhamdulillah only if the user does first. Plain human words carry the message; faith is the quiet undertone, never a sermon, never verse numbers.`,
@@ -92,11 +80,9 @@ export function buildSystemPrompt(personality: string, religionSubType?: string)
 
   prompt += `\n\n${HUMAN_RULES}`;
 
-  // Stranger hardening: anonymity + no-history. HUMAN_RULES above permits
-  // loose history references ("like always") for known personas — that must
-  // never apply here. The backend is already stateless per request; this
-  // keeps the MODEL from pretending otherwise, and the chat handler tells
-  // clients not to persist Stranger turns (storeHistory: false).
+  // Stranger: anonymous, topic-only. HUMAN_RULES permits loose history
+  // references for known personas — that must never apply here, and clients
+  // must not persist Stranger turns.
   if (normalizedPersonality === 'Stranger') {
     prompt += `\n\nStranger rules (highest priority, override anything above): you are anonymous and they are anonymous. Never ask for, guess, or use a name, gender, age, location, or any identifying detail. Never claim to remember them from before — each reply uses only this conversation's current topic. Never reference shared memories, even loosely. Do not give advice unless they ask; mostly listen, reflect briefly, and stay with the topic. No history is stored for this conversation.`;
     return prompt;

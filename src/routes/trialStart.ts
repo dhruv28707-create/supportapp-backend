@@ -2,6 +2,8 @@ import { Response } from 'express';
 import { auth } from '../config/firebaseAdmin';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { consumeRateLimit, RateLimitExceededError } from '../services/rateLimitService';
+import { enforceTrialIpThrottle } from '../services/chatClientThrottle';
+import { extractClientIp } from '../utils/request';
 import {
   startUltimateTrial,
   TrialNotAllowedError,
@@ -16,22 +18,10 @@ const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
 /**
- * POST /api/trial/start
- *
- * Starts the 5-day Ultimate free trial. Auth required; uid comes from the
- * verified Firebase token, never from the body.
- *
- * Eligibility (all enforced server-side):
- *  - The account must be NEW: its Firebase Auth `metadata.creationTime` must
- *    fall within TRIAL_ELIGIBILITY_WINDOW_DAYS (default 7). This uses the
- *    authoritative Auth record, not the client-writable users/{uid} doc.
- *  - The account must never have trialed before (permanent `trialUsed`).
- *  - The account must not already be on a paid plan.
- *
- * No payment is involved and no Razorpay order is created. When the 5 days
- * expire, the existing expiry downgrade returns the user to free — the app
- * should then offer the choice cards from GET /api/plans (free / monthly /
- * yearly).
+ * POST /api/trial/start — 5-day Ultimate free trial for new accounts only.
+ * Auth required; uid comes from the verified token. New-account check uses
+ * the Auth record (not client-writable docs); one-trial-per-account is
+ * enforced transactionally. No payment involved.
  */
 export async function trialStartHandler(
   req: AuthenticatedRequest,
@@ -39,8 +29,7 @@ export async function trialStartHandler(
 ): Promise<void> {
   const uid = req.user!.uid;
 
-  // Abuse backstop (fail-open, like every limiter here). One trial per account
-  // is the real guard; this only stops hammering the endpoint.
+  // Per-uid backstop against hammering.
   try {
     await consumeRateLimit(`trial-start:${uid}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   } catch (error) {
@@ -49,6 +38,21 @@ export async function trialStartHandler(
       return;
     }
     console.error(`[trial-start] Rate limit check failed (allowing request) uid=${uid.slice(0, 8)}:`, error);
+  }
+
+  // Per-IP cap: per-uid limits alone can't stop one script farming trials
+  // across fresh accounts from a single address.
+  const ip = extractClientIp(req);
+  if (ip) {
+    try {
+      await enforceTrialIpThrottle(ip);
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        res.status(429).json({ error: 'Too many requests, try again later' });
+        return;
+      }
+      console.error(`[trial-start] IP throttle check failed (allowing request) uid=${uid.slice(0, 8)}:`, error);
+    }
   }
 
   // --- New-accounts-only gate, from the authoritative Auth record ----------

@@ -17,8 +17,8 @@ import { isOriginAllowed } from './config/cors';
 import { db } from './config/firebaseAdmin';
 
 /**
- * The Express app, extracted from index.ts so tests can drive the real
- * routes via supertest (src/index.ts only adds .listen + graceful shutdown).
+ * Express app factory (tests drive these same routes via supertest;
+ * index.ts only adds listen + shutdown).
  */
 export function createApp(): express.Express {
   const app = express();
@@ -60,8 +60,7 @@ export function createApp(): express.Express {
   app.get('/api/plans', plansHandler);
 
   app.get('/api/user/plan', authMiddleware, getUserPlanHandler);
-  // Canonical source for Settings > Usage. /api/user/plan is kept for
-  // backward compat; new clients should use /api/user/usage.
+  // /api/user/plan is legacy compat; new clients use /api/user/usage.
   app.get('/api/user/usage', authMiddleware, getUsageHandler);
 
   app.post('/api/chat', authMiddleware, chatSendHandler);

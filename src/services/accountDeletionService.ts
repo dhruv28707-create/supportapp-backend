@@ -14,42 +14,17 @@ import {
 } from './chatHistoryDiscovery';
 
 /**
- * Account deletion — server-side path.
- *
- * Policy implemented here:
- *  - The requester must be the authenticated owner (uid comes from the
- *    verified Firebase ID token; there is no admin override path here).
- *  - An ACTIVE paid subscription blocks deletion (HTTP 409) so deletion
- *    cannot be used to silently walk away from a paid term. The user must
- *    cancel first via POST /api/payment-cancel (which downgrades the plan
- *    immediately), let it expire, or contact support for refunds per the
- *    app's stated policy.
- *  - Otherwise: server-side data (subscriptions, rate-limit counters, the
- *    users/{uid} profile doc, and any pending payment records owned by the
- *    user) is deleted. Paid payment history rows are NOT deleted — they are
- *    financial records; instead the uid is redacted to keep the row
- *    attributable to a payment without pointing at a live account.
- *  - Finally the user's Firebase refresh tokens are revoked, which
- *    invalidates all existing ID tokens within ~minutes (the max ID-token
- *    lifetime), cutting off future API access even for copied tokens.
- *
- * LATENCY CONTRACT: mobile HTTP clients abort ("Aborted" error) long before
- * serverless functions finish if deletion takes >10s. Every independent
- * cleanup step therefore runs in PARALLEL, and the chat-layout discovery
- * probes (32 collection x field combinations) run concurrently with a hard
- * per-probe timeout instead of strictly one-by-one.
+ * Account deletion (server-side). Active paid terms block deletion (409);
+ * otherwise wipes subscriptions, profile, chats, pending orders (paid rows
+ * anonymized), and rate-limit counters, then revokes tokens. Paid rows are
+ * kept as anonymized financial records. Independent steps run in parallel
+ * to stay under mobile client timeouts.
  */
 
-/**
- * Hard per-probe time budget for chat-layout discovery. Covers the FULL
- * paginated delete of that shape now, not just one page — a heavy user with
- * thousands of docs legitimately needs longer than before, so this is well
- * above the old 4s. Still far under the 60s function limit; typical users
- * (<400 docs per shape) finish in one round trip.
- */
+/** Per-probe budget for chat-layout discovery (covers full paginated delete). */
 const PROBE_TIMEOUT_MS = 30000;
 
-/** Docs fetched per query page during payment cleanup (see loop below). */
+/** Docs fetched per query page during payment cleanup. */
 const PAYMENTS_PAGE_SIZE = 400;
 
 /** Rejects if the underlying promise has not settled within `ms`. */
@@ -92,9 +67,8 @@ export interface DeletionSummary {
 
 /** Deletes or anonymizes all server-side data tied to the user. */
 export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
-  // TOCTOU guard: re-check the subscription INSIDE the wipe path (not just in
-  // the route). A grant racing between the route's 409 check and this delete
-  // must block instead of wiping an active payer.
+  // Re-check inside the wipe path: a grant racing the route's 409 check must
+  // still block instead of wiping an active payer.
   const activeExpiry = await getActiveSubscriptionExpiry(uid);
   if (activeExpiry) {
     throw new DeletionBlockedError(activeExpiry);
@@ -111,8 +85,7 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
   };
   const startedAt = Date.now();
 
-  // 1) Subscription state (server-only quota/plan doc). Check existence first
-  // so the summary does not over-report success on absent docs.
+  // 1) Subscription doc. Check existence so the summary stays accurate.
   const deleteSubscription = (async () => {
     try {
       const snap = await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).get();
@@ -139,13 +112,10 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
     }
   })();
 
-  // 3) Payment records owned by the user.
+  // 3) Payment records owned by the user (paginated, fresh batch per page —
+  // committed batches can't be reused and uncommitted trailing ops persist
+  // nothing).
   const cleanupPayments = (async () => {
-    // Paginate: a heavy user can have more payments than one query's window.
-    // Commit a FRESH batch per page: Firestore batches are single-use (a
-    // committed batch cannot be reused), and the trailing ops must be
-    // committed too — otherwise deletes/anonymizations never persist, the
-    // same page matches forever, and production loops until timeout.
     for (;;) {
       const payments = await db
         .collection(PAYMENTS_COLLECTION)
@@ -181,12 +151,8 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
     console.error(`[delete-account] Payment cleanup failed for uid=${uid.slice(0, 8)}:`, error);
   });
 
-  // 4) Chat history written by the app into Firestore.
-  //    The app must NOT try to delete these client-side (security rules deny
-  //    everything the backend does not explicitly allow, and the catch-all
-  //    rule denies the rest) — this server-side purge is the single source of
-  //    truth for wiping chat data. Layout is auto-discovered; CHAT_COLLECTIONS
-  //    overrides the candidate list.
+  // 4) Chat history (server-side purge; clients can't do this themselves —
+  // rules deny it). Layout auto-discovered; CHAT_COLLECTIONS overrides.
   const cleanupChats = deleteChatHistory(uid)
     .then(({ docsDeleted, docsFailed }) => {
       summary.chatsDeleted = docsDeleted;
@@ -196,13 +162,13 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
       console.error(`[delete-account] Chat history cleanup failed for uid=${uid.slice(0, 8)}:`, error);
     });
 
-  // 5) Rate-limit counters (no personal content, but tied to the uid key).
+  // 5) Rate-limit counters keyed by uid.
   const cleanupRateLimits = cleanupRateLimitCounters(uid).catch((error) => {
     console.error(`[delete-account] Rate limit cleanup failed for uid=${uid.slice(0, 8)}:`, error);
   });
 
-  // All five phases are independent — run them concurrently. Each promise
-  // above already catches its own errors (best-effort semantics preserved).
+  // Independent phases — run concurrently. Each already catches its own
+  // errors (best-effort).
   await Promise.all([
     deleteSubscription,
     deleteUserDoc,
@@ -216,10 +182,8 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
 }
 
 /**
- * Rate-limit counters are keyed deterministically (`chat:<uid>`,
- * `payment-order:<uid>`, ...), so they can be deleted directly — no need to
- * scan the whole rateLimits collection (which read EVERY user's counters and
- * scaled with total user count). Deleting a nonexistent doc is a no-op.
+ * Rate-limit counters are keyed by uid (`chat:<uid>`, ...), so they delete
+ * directly without scanning the collection.
  */
 async function cleanupRateLimitCounters(uid: string): Promise<void> {
   const prefixes = [
@@ -239,16 +203,9 @@ async function cleanupRateLimitCounters(uid: string): Promise<void> {
 }
 
 /**
- * Deletes the user's chat history from Firestore. The app stores chats in a
- * shape this repo does not define, so all well-known shapes are attempted
- * (see chatHistoryDiscovery.ts). Best-effort: failures are logged and
- * counted, never thrown.
- *
- * All probes run CONCURRENTLY with a per-probe timeout: serialized probing of
- * 32 collection/field combinations alone used to take several seconds of
- * round-trips, which (with the rest of the cleanup) pushed the endpoint past
- * mobile HTTP client timeouts — the client saw "Aborted" while the function
- * still completed with 200.
+ * Deletes the user's chat history across well-known shapes (see
+ * chatHistoryDiscovery.ts). Best-effort: failures are counted, never thrown.
+ * Probes run concurrently with per-probe timeouts.
  */
 async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; docsFailed: number }> {
   const startedAt = Date.now();
@@ -271,18 +228,15 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
   };
 
   /**
-   * Deletes EVERY doc matching `query`, paginating with a cursor so a user
-   * with more than one page of docs is fully wiped. Returns the count of
-   * docs deleted. Throws on query failure so the caller can count it.
+   * Deletes every doc matching `query` via paged reads. Bounded (400/page,
+   * 25 pages max) so residual data is reported instead of looping past the
+   * function budget.
    */
   async function deleteChatDocsByQuery(
     query: FirebaseFirestore.Query
   ): Promise<number> {
     const PAGE_SIZE = 400;
     let deleted = 0;
-    // Bounded for the 60s function budget: 400/page x 25 pages = ~10k docs max
-    // per probe. Beyond that the summary reports docsFailed so residual data
-    // is VISIBLE instead of silently looping until timeout.
     const MAX_PAGES = 25;
     for (let page = 0; page < MAX_PAGES; page++) {
       const snap = await query.limit(PAGE_SIZE).get();
@@ -302,11 +256,7 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
     const topLevelCandidates: readonly string[] =
       override.length > 0 ? override : CHAT_STORAGE_SHAPES.UID_FIELD_COLLECTIONS;
 
-    // Shape A: top-level collection with an owner uid field on each doc.
-    // Queries paginate (startAfter cursor) so users with more than one
-    // page of messages are FULLY wiped — the old single .limit(1000) get()
-    // silently left residual data, a GDPR problem as heavy users accumulate
-    // thousands of chat docs.
+    // Shape A: top-level collection with an owner uid field per doc.
     const shapeAProbes = topLevelCandidates.flatMap((collection) =>
       USER_DATA_FIELD_HINTS.map((field) =>
         withTimeout(
@@ -324,7 +274,7 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
           })
           .catch((error) => {
             // Unknown collection / missing index — expected for shapes the
-            // app does not use; log and continue with the next candidate.
+            // app doesn't use; log and continue.
             docsFailed += 1;
             console.error(
               `[delete-account] Chat purge probe failed on ${collection}.${field}:`,
@@ -419,22 +369,20 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
   return { docsDeleted, docsFailed };
 }
 
-/** Revokes all of the user's refresh tokens so existing ID tokens die within minutes. */
+/** Revokes refresh tokens so existing ID tokens die within minutes. */
 export async function revokeUserTokens(uid: string): Promise<boolean> {
   try {
     await auth.revokeRefreshTokens(uid);
     return true;
   } catch (error) {
-    // A user that never signed in through a token flow may not exist in Auth;
-    // deletion of the data should still succeed.
     console.error(`[delete-account] Token revocation failed for uid=${uid.slice(0, 8)}:`, error);
     return false;
   }
 }
 
 /**
- * Checks whether the user has an active paid subscription that blocks
- * deletion. Returns the ISO expiry string when blocked, else null.
+ * Active paid term blocking deletion, as an ISO expiry string (else null).
+ * Cancelled, trial, free, and expired terms never block.
  */
 export async function getActiveSubscriptionExpiry(uid: string): Promise<string | null> {
   const snap = await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).get();
@@ -442,14 +390,7 @@ export async function getActiveSubscriptionExpiry(uid: string): Promise<string |
 
   const data = snap.data() || {};
   if (!data.plan || data.plan === 'free') return null;
-
-  // A cancelled subscription no longer blocks deletion: the user went through
-  // POST /api/payment-cancel (or the doc was already flipped). Only an ACTIVE
-  // paid term is a reason to refuse deleting the account.
   if (normalizeStatus(data.status) === 'cancelled') return null;
-
-  // A free trial carries no payment obligation, so it never blocks deletion
-  // (product decision: users may delete at any point during the trial).
   if (data.isTrial === true) return null;
 
   const expires = data.expiresAt;

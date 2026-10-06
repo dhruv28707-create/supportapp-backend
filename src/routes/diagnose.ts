@@ -4,21 +4,8 @@ import { razorpay } from '../services/razorpayClient';
 
 /**
  * Diagnostic endpoint (no secrets exposed). Disabled by default — set
- * ENABLE_DIAGNOSE=true in the environment to turn it on, since it reveals
- * which secrets are configured and can trigger real upstream calls.
- *
- * GET /api/diagnose
- *   Reports which required env vars are present, plus the active models.
- *
- * GET /api/diagnose?test=1
- *   Additionally performs a live Groq API call (128 max tokens — small but
- *   enough for a real reply) and reports the exact upstream status, reply,
- *   finish_reason, usage, and a raw-response snippet when no content came
- *   back. This pinpoints whether the AI failure is a missing key, an
- *   invalid/out-of-credits key, a model-level error, or empty content.
- *
- * Deliberately does NOT depend on Firebase, so it still works when the rest of
- * the backend is misconfigured.
+ * ENABLE_DIAGNOSE=true to turn it on. Live probes (?test=1, ?rzp=1) cost
+ * real provider money, so they need the admin token too.
  */
 export async function diagnoseHandler(req: Request, res: Response): Promise<void> {
   if (process.env.ENABLE_DIAGNOSE !== 'true') {
@@ -26,10 +13,7 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
     return;
   }
 
-  // Read lazily per request (not frozen at import) so model overrides take
-  // effect without restart and match chatSend's lazy targets. Groq answers
-  // first by default (it is much faster); the legacy *_MODEL names are still
-  // honored so an existing deployment's overrides keep applying.
+  // Read lazily per request so model overrides take effect without restart.
   const primaryProvider =
     (process.env.CHAT_PRIMARY_PROVIDER || '').toLowerCase() === 'openrouter'
       ? 'openrouter'
@@ -66,13 +50,9 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
     env,
   };
 
-  // Live Razorpay self-test: ?rzp=1 attempts to create a minimal ₹1 order
-  // with the deployed keys and reports the exact outcome (or upstream error).
-  // Never exposes the keys themselves. The order is never paid and expires.
-  //
-  // Gated: unauthenticated callers could otherwise mint unlimited ₹1 orders
-  // against the live key. Requires DIAGNOSE_ADMIN_TOKEN to be configured and
-  // the caller to send it as x-diagnose-token. No token configured → denied.
+  // Live Razorpay self-test: ?rzp=1 creates a minimal ₹1 order (never paid).
+  // Gated: unauthenticated callers could otherwise mint unlimited orders
+  // against the live key. Requires x-diagnose-token == DIAGNOSE_ADMIN_TOKEN.
   if (req.query.rzp === '1') {
     const adminToken = process.env.DIAGNOSE_ADMIN_TOKEN || '';
     const provided = String(req.headers['x-diagnose-token'] || '');
@@ -114,8 +94,17 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
     return;
   }
 
+  // Live Groq probe (?test=1). Gated like ?rzp=1: without the admin token
+  // anyone could burn AI spend through this endpoint.
   if (req.query.test !== '1') {
     res.json({ ...base, note: 'Pass ?test=1 to run a live Groq API check (128 max tokens).' });
+    return;
+  }
+
+  const adminToken = process.env.DIAGNOSE_ADMIN_TOKEN || '';
+  const provided = String(req.headers['x-diagnose-token'] || '');
+  if (!adminToken || provided !== adminToken) {
+    res.status(403).json({ ...base, groqTest: { ok: false, error: 'Forbidden' } });
     return;
   }
 
@@ -136,8 +125,6 @@ export async function diagnoseHandler(req: Request, res: Response): Promise<void
       body: JSON.stringify({
         model: groqModel,
         messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
-        // Enough for a short diagnostic reply; a healthy result should show
-        // reply != null.
         max_tokens: 128,
         temperature: 0,
       }),

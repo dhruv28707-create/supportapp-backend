@@ -25,18 +25,13 @@ export async function getUserPlanHandler(req: AuthenticatedRequest, res: Respons
     const nextRefreshAt = lastResetAt + refreshMs;
     const isLimitReached = messageCount >= limit;
 
-    // Refill UX gate: the countdown must NOT appear from the first message.
-    // Below 75% usage the timer stays hidden (lobby/chat stay clean); only
-    // Settings may show it, and only when showRefillTimer is true.
-    // nextRefreshAt is still returned for backward compat — clients must
-    // ignore it unless showRefillTimer is true.
+    // Refill UX gate (75% rule): nextRefreshAt is always returned, but
+    // clients only show the countdown when showRefillTimer is true.
     const quotaPercent = getQuotaUsageFraction(messageCount, limit);
     const showRefillTimer = shouldShowRefillTimer(messageCount, limit, isLimitReached);
 
-    // Offer the free-trial CTA only to a free account that has never trialed
-    // and is still "new". The account-age check costs one Auth call, so it is
-    // skipped entirely for paid and already-trialed users. The trial-start
-    // endpoint re-checks authoritatively regardless of what we return here.
+    // Trial CTA hint only for free, never-trialed, still-new accounts. The
+    // trial endpoint re-checks regardless of this hint.
     let trialAvailable = false;
     if (!trialUsed && plan === DEFAULT_PLAN) {
       try {
@@ -52,14 +47,12 @@ export async function getUserPlanHandler(req: AuthenticatedRequest, res: Respons
     res.json({
       plan,
       messagesRemaining,
-      // Back-compat: always a number. New clients must gate on showRefillTimer.
       nextRefreshAt,
       isLimitReached,
       isTrial,
       trialEndsAt,
       trialUsed,
       trialAvailable,
-      // New quota-UX fields for the 75% refill rule:
       messagesUsed: Math.max(0, messageCount),
       messagesTotal: limit,
       quotaPercent,

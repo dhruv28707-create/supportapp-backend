@@ -14,36 +14,18 @@ const RATE_LIMIT_MAX = 6;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
 /**
- * POST /api/payment-cancel
- *
- * Cancels the authenticated user's active subscription so the Delete Account
- * flow is no longer blocked by an active paid term. No request body.
- *
- * Semantics (matches the frontend contract — the caller treats every 2xx as
- * success and never blocks deletion on this endpoint):
- *  - No active subscription (absent, already cancelled, free, or expired
- *    plan): 200 { ok: true, message: 'No active subscription found' }.
- *    This is deliberately NOT an error, so replays and fresh users both
- *    succeed — the endpoint is idempotent, like payment-verify.
- *  - Active subscription: cancelled IMMEDIATELY (plan -> free, perks end
- *    now) and 200 { ok: true, message: 'Subscription cancelled' }.
- *  - Razorpay-side cancellation is best-effort and never blocks the local
- *    state flip: this backend's payments are one-time Razorpay orders, so
- *    there is normally no Razorpay subscription entity at all. Only if a
- *    subscription id is ever present on the record (future recurring plans)
- *    is the Razorpay API called; its failure is logged and swallowed.
- *
- * Keys live in the existing RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET env vars —
- * they are server-side only and never appear in any response.
+ * POST /api/payment-cancel — cancels the active subscription (immediate
+ * downgrade to free) so Delete Account is unblocked. Idempotent: no active
+ * subscription is still a 200. Razorpay-side cancellation is best-effort
+ * (one-time orders normally have no subscription entity).
  */
 export async function paymentCancelHandler(
   req: AuthenticatedRequest,
   res: Response
 ): Promise<void> {
-  // uid is always taken from the verified Firebase token — never from the body/query.
+  // uid comes from the verified token, never the body.
   const uid = req.user!.uid;
 
-  // --- Abuse rate limit (fail-open, consistent with the other payment limiters) ---
   try {
     await consumeRateLimit(`payment-cancel:${uid}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   } catch (error) {
@@ -71,24 +53,18 @@ export async function paymentCancelHandler(
   const status = normalizeStatus(data.status);
   const hasPaidPlan = typeof data.plan === 'string' && data.plan !== DEFAULT_PLAN;
 
-  // No active subscription: absent doc, already cancelled, free plan, or a
-  // paid doc already downgraded (expiry). Success per the frontend contract.
+  // No active subscription: absent doc, already cancelled, or free plan.
   if (!snap.exists || status !== 'active' || !hasPaidPlan) {
     res.json({ ok: true, message: 'No active subscription found' });
     return;
   }
 
-  // --- Best-effort Razorpay-side cancellation (future-proofing only) ---
-  // cancelUserSubscription flips the doc regardless of what happens here, so
-  // a Razorpay outage/never blocks deletion. With one-time orders there is
-  // no subscription entity and this branch never runs.
+  // Best-effort Razorpay-side cancellation (only runs if a subscription id
+  // is ever present; one-time orders have none). Never blocks local state.
   const razorpaySubscriptionId =
     typeof data.razorpaySubscriptionId === 'string' ? data.razorpaySubscriptionId : null;
   if (razorpaySubscriptionId) {
     try {
-      // Immediate cancellation (default) to match the immediate local
-      // downgrade. Errors like "already cancelled" / "not found" land in the
-      // catch and are deliberately non-fatal.
       await razorpay.subscriptions.cancel(razorpaySubscriptionId);
     } catch (error) {
       console.error(
@@ -98,12 +74,11 @@ export async function paymentCancelHandler(
     }
   }
 
-  // --- Local cancellation: immediate downgrade, atomic and idempotent ---
+  // Local cancellation: immediate downgrade, idempotent.
   try {
     const cancelled = await cancelUserSubscription(uid);
     if (!cancelled) {
-      // State changed between the read above and the transaction (e.g. a
-      // concurrent cancel or expiry). Still a success for the caller.
+      // State changed between the read and the write (concurrent cancel).
       console.log(`[payment-cancel] No active subscription at transaction time uid=${uid.slice(0, 8)}`);
       res.json({ ok: true, message: 'No active subscription found' });
       return;

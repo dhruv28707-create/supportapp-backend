@@ -27,13 +27,9 @@ export const PERSONALITIES = [
 export type PersonalityType = (typeof PERSONALITIES)[number];
 
 /**
- * Plan-based persona gating, enforced SERVER-SIDE in the chat handler
- * (src/routes/chatSend.ts). The frontend's UI locks are cosmetic only.
- *
- * Family + friend personas are free; the rest require a paid plan.
- * Stranger is intentionally free for every plan (anonymous listener with no
- * history) so any user can vent without commitment.
- * If this list ever changes, keep it in sync with the frontend's plan screen.
+ * Plan-based persona gating, enforced server-side in the chat handler.
+ * Family + friend personas are free; the rest need a paid plan. Stranger
+ * stays free on every plan (anonymous, no history).
  */
 export const FREE_PERSONALITIES: readonly string[] = [
   'Father',
@@ -46,10 +42,8 @@ export const FREE_PERSONALITIES: readonly string[] = [
 ];
 
 /**
- * The anonymous listener persona. Backend treats it specially:
- * - allowed on every plan (see FREE_PERSONALITIES)
- * - replies carry `storeHistory: false` so clients must not persist chats
- * - the system prompt assumes zero user identity (no name/gender/memory)
+ * The anonymous listener persona. Replies carry `storeHistory: false` and
+ * the system prompt assumes zero user identity.
  */
 export const STRANGER_PERSONALITY = 'Stranger' as const;
 
@@ -72,19 +66,14 @@ export class LimitReachedError extends Error {
   }
 }
 
-// Per-attempt timeout for upstream AI calls (chat + diagnose).
-//
-// Latency budget: users read anything past ~10s as "it's stuck", and mobile
-// clients abort around 10s anyway, so a 15s attempt produced nothing at all
-// for a hung provider. At 9s a slow attempt is abandoned while the
-// staggered fallback still has room to answer inside the user's patience
-// window.
+// Per-attempt timeout for upstream AI calls. Past ~10s users read the chat
+// as stuck and mobile clients abort anyway, so slow attempts are abandoned
+// while the staggered fallback still has room to answer.
 export const AI_TIMEOUT_MS = 9000;
 
-// How long after the primary attempt the fallback is launched (see
-// chatSend.ts). Short enough that the fallback still answers in time when
-// the primary is hung; long enough that a merely slow-but-healthy
-// primary still wins, so we don't double-bill tokens on every request.
+// Delay before the fallback attempt starts. Short enough to still answer in
+// time when the primary hangs; long enough that a merely slow primary still
+// wins and we don't double-bill tokens on every request.
 export const CHAT_FALLBACK_STAGGER_MS = 500;
 
 // Prices in paise (₹1 = 100 paise). Single source of truth for order amounts.
@@ -109,18 +98,10 @@ export function tierToPlan(tier: string): PlanType | null {
   return (TIER_TO_PLAN as Record<string, PlanType | undefined>)[tier] ?? null;
 }
 
-// ---------------------------------------------------------------------------
-// Quota refill visibility (UX gate, not a quota-accounting change)
-//
-// Complaint: the refill countdown started from the very first message, so a
-// user opening the app or sending 1 message immediately saw "refills in Xh".
-// Rule now: the refill timer is only SURFACED once >= 75% of the plan quota
-// is used (or the limit is reached). Below that the backend still reports
-// quota counts, but sets showRefillTimer=false so clients hide the countdown.
-// Where to show it is a frontend decision — lobby/chat must ignore the timer,
-// Settings may show it when showRefillTimer is true. The quota window itself
-// still rolls on lastResetAt; this only gates visibility.
-// ---------------------------------------------------------------------------
+// Quota refill visibility (UX gate, not quota accounting): the refill
+// countdown is only surfaced once >= 75% of the plan quota is used (or the
+// limit is hit). Below that clients hide it. The quota window itself still
+// rolls on lastResetAt.
 
 /** Fraction of quota used at/above which the refill countdown is surfaced. */
 export const QUOTA_REFILL_VISIBILITY_THRESHOLD = 0.75;
@@ -133,9 +114,7 @@ export function getQuotaUsageFraction(messageCount: number, limit: number): numb
 }
 
 /**
- * Whether the client should surface the refill countdown at all.
- * True when the limit is reached or usage >= 75%. Below that, lobby/chat
- * must stay clean and even Settings should not show a countdown.
+ * Whether the client should surface the refill countdown.
  */
 export function shouldShowRefillTimer(
   messageCount: number,
@@ -146,15 +125,9 @@ export function shouldShowRefillTimer(
   return getQuotaUsageFraction(messageCount, limit) >= QUOTA_REFILL_VISIBILITY_THRESHOLD;
 }
 
-// ---------------------------------------------------------------------------
-// Free trial (Ultimate only, NEW accounts only, once per account)
-//
-// A newly-signed-up user may activate 5 days of Ultimate for free via
-// POST /api/trial/start. There is no auto-charge (payments are one-time
-// Razorpay orders); when the 5 days end the plan downgrades to free and the
-// permanent `trialUsed` flag prevents another trial ever. The user is then
-// offered the choice cards from getPlanOptions(): free / monthly / yearly.
-// ---------------------------------------------------------------------------
+// Free trial: 5 days of Ultimate for new accounts, once ever. No auto-charge
+// (payments are one-time Razorpay orders); expiry downgrades to free and the
+// permanent `trialUsed` flag prevents another trial.
 export const ULTIMATE_TRIAL_DAYS = 5;
 export const ULTIMATE_TRIAL_MS = ULTIMATE_TRIAL_DAYS * 24 * 60 * 60 * 1000;
 export const TRIAL_PLAN: PlanType = 'ultimate';
@@ -163,8 +136,8 @@ export const TRIAL_PLAN: PlanType = 'ultimate';
 export const DEFAULT_TRIAL_ELIGIBILITY_WINDOW_DAYS = 7;
 
 /**
- * Account-age window for trial eligibility, read lazily (per request) so
- * tests/ops can change it without an import-time freeze.
+ * Account-age window for trial eligibility, read per request so ops can
+ * tune it without a restart.
  */
 export function getTrialEligibilityWindowDays(): number {
   const raw = Number(process.env.TRIAL_ELIGIBILITY_WINDOW_DAYS);
@@ -194,10 +167,8 @@ export interface PlanOption {
 }
 
 /**
- * The post-trial choice cards: free, Ultimate Monthly, Ultimate Yearly —
- * all three Ultimate options render from this one source of truth, so the
- * displayed price always matches what payment-order will charge. Add the pro
- * tiers here if they should be shown too.
+ * Post-trial choice cards: free, Ultimate Monthly, Ultimate Yearly.
+ * Prices render from TIER_PRICES so display always matches the charge.
  */
 export function getPlanOptions(): PlanOption[] {
   const deal = (plan: PlanType, period: 'monthly' | 'yearly' | null, tier: Tier | null, label: string, description: string, highlights: string[], recommended: boolean): PlanOption => {

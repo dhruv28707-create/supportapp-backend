@@ -11,17 +11,9 @@ import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { auth } from '../config/firebaseAdmin';
 
 /**
- * GET /api/user/usage
- *
- * Canonical source for the Settings > Usage screen. Same quota numbers as
- * GET /api/user/plan (kept for backward compat), plus Usage-specific display
- * fields so the frontend can move ALL plan/quota UI out of lobby + chat and
- * into one place:
- *
- * - `refillInMs` / `refreshHours` for the "refills in Xh Ym" line
- * - `showRefillTimer` gate (75% rule): hide the countdown unless true
- * - `uiHints.showQuotaInUsageOnly`: lobby + chat must not render any
- *   messages-left / refill UI; only the Usage screen may.
+ * GET /api/user/usage — quota numbers for the Settings > Usage screen.
+ * Same counts as /api/user/plan (kept for compat) plus refill display
+ * fields and uiHints telling the app to keep quota UI out of lobby + chat.
  */
 export async function getUsageHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
   const uid = req.user!.uid;
@@ -63,14 +55,11 @@ export async function getUsageHandler(req: AuthenticatedRequest, res: Response):
       refillInMs,
       refreshHours: refreshMs / (60 * 60 * 1000),
       isLimitReached,
-      // 75% visibility gate: clients must hide the refill countdown unless true.
-      // nextRefreshAt/refillInMs are still returned for compat — ignore unless true.
       showRefillTimer,
       isTrial,
       trialEndsAt,
       trialUsed,
       trialAvailable,
-      // Tells the app where quota UI belongs from now on.
       uiHints: {
         showQuotaInUsageOnly: true,
         hideQuotaInLobby: true,
