@@ -60,12 +60,35 @@ export async function deleteAccountHandler(
   try {
     const requestStartedAt = Date.now();
 
-    // Revocation is independent of the Firestore wipe — run both at once.
+    // Auth deletion runs CONCURRENTLY with the Firestore wipe, not after it.
+    // Previously it ran last, so a slow chat purge (30s/probe, 60s Vercel
+    // budget) or a client timeout could kill the function before
+    // auth.deleteUser() ever ran: tokens were revoked (user looks logged
+    // out) but the Firebase Auth record survived, so the same Google email
+    // could sign straight back into the same uid. Starting the delete early
+    // gives it a head start, and a failed delete now fails the request
+    // instead of returning a lying success:true.
     // (Auth for this request was already verified, so mid-request revocation
     // can't invalidate our own invocation.)
     const dataCleanupPromise = deleteAccountData(uid);
-    const tokensRevoked = await revokeUserTokens(uid);
-    const summary = await dataCleanupPromise;
+    const tokensRevokedPromise = revokeUserTokens(uid);
+    const authDeletePromise = (async (): Promise<boolean> => {
+      try {
+        await auth.deleteUser(uid);
+        return true;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code === 'auth/user-not-found') return true;
+        console.error(`[delete-account] Firebase Auth delete failed for uid=${uid.slice(0, 8)}:`, error);
+        return false;
+      }
+    })();
+
+    const [summary, tokensRevoked, firebaseAuthDeleted] = await Promise.all([
+      dataCleanupPromise,
+      tokensRevokedPromise,
+      authDeletePromise,
+    ]);
 
     const totalDataMs = Date.now() - requestStartedAt;
 
@@ -85,19 +108,19 @@ export async function deleteAccountHandler(
       );
     }
 
-    // Best-effort Auth account removal. The frontend may have already
-    // deleted client-side; user-not-found then counts as success.
-    let firebaseAuthDeleted = false;
-    try {
-      await auth.deleteUser(uid);
-      firebaseAuthDeleted = true;
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      if (code === 'auth/user-not-found') {
-        firebaseAuthDeleted = true;
-      } else {
-        console.error(`[delete-account] Firebase Auth delete failed for uid=${uid.slice(0, 8)}:`, error);
-      }
+    // Best-effort Auth account removal above. A failed delete must NEVER
+    // return success:true — the client signs out on success, and a surviving
+    // Auth record lets the same email sign straight back in (the reported bug).
+    if (!firebaseAuthDeleted) {
+      console.error(
+        `[delete-account] Auth deletion failed for uid=${uid.slice(0, 8)} — returning 500 instead of success`
+      );
+      res.status(500).json({
+        error: 'Failed to delete authentication account. Please try again.',
+        code: 'auth_delete_failed',
+        firebaseAuthDeleted: false,
+      });
+      return;
     }
 
     console.log(
