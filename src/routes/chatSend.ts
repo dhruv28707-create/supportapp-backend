@@ -93,9 +93,48 @@ function getModelTargets(): { PRIMARY: ModelTarget; FALLBACK: ModelTarget } {
 // stays tight for latency.
 const MAX_TOKENS = 300;
 const MAX_MESSAGE_LENGTH = 2000;
+// Some OpenAI-compatible models occasionally emit one of their internal
+// end-of-turn tokens and then continue generating junk. Ask providers to stop
+// there, and also filter them locally because a provider can ignore `stop`.
+const MODEL_STOP_MARKERS = ['<|endoftext|>', '<|im_end|>', '<|end|>'];
 // Bound on the legacy `messages[]` fallback so one request can't force the
 // server to scan an unbounded array.
 const MAX_LEGACY_MESSAGES = 50;
+
+/** Remove an accidental model control token and everything after it. */
+function removeModelContinuation(text: string): string {
+  let stopAt = text.length;
+  for (const marker of MODEL_STOP_MARKERS) {
+    const index = text.indexOf(marker);
+    if (index !== -1 && index < stopAt) stopAt = index;
+  }
+  return text.slice(0, stopAt);
+}
+
+/**
+ * A streaming control token can be split over several network chunks. Keep
+ * only a possible marker prefix pending so no part of it reaches the client.
+ */
+function splitSafeStreamText(text: string): { safe: string; pending: string; stopped: boolean } {
+  const cleaned = removeModelContinuation(text);
+  if (cleaned.length !== text.length) return { safe: cleaned, pending: '', stopped: true };
+
+  let pendingLength = 0;
+  for (const marker of MODEL_STOP_MARKERS) {
+    const max = Math.min(marker.length - 1, text.length);
+    for (let length = max; length > pendingLength; length--) {
+      if (marker.startsWith(text.slice(-length))) {
+        pendingLength = length;
+        break;
+      }
+    }
+  }
+  return {
+    safe: text.slice(0, text.length - pendingLength),
+    pending: text.slice(text.length - pendingLength),
+    stopped: false,
+  };
+}
 
 // Provider circuit breakers (per-instance, in-memory). After N consecutive
 // failures a model is skipped for a cooldown, then probed again. Inexact
@@ -183,6 +222,7 @@ async function callModel(
         messages,
         max_tokens: MAX_TOKENS,
         temperature: 0.8,
+        stop: MODEL_STOP_MARKERS,
         ...(target.extraBody || {}),
       }),
       signal: controller.signal,
@@ -196,7 +236,10 @@ async function callModel(
     const data = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    return { ok: true, reply: data.choices?.[0]?.message?.content?.trim() ?? '' };
+    return {
+      ok: true,
+      reply: removeModelContinuation(data.choices?.[0]?.message?.content?.trim() ?? ''),
+    };
   } catch (error) {
     return { ok: false, status: undefined, errorData: error };
   } finally {
@@ -295,6 +338,7 @@ async function streamAttempt(
           max_tokens: MAX_TOKENS,
           temperature: 0.8,
           stream: true,
+          stop: MODEL_STOP_MARKERS,
           ...(target.extraBody || {}),
         }),
         signal: controller.signal,
@@ -315,8 +359,24 @@ async function streamAttempt(
     let full = '';
     let gotFirst = false;
     let buffer = '';
+    let pendingControlToken = '';
     const decoder = new TextDecoder();
     const stream = body as unknown as AsyncIterable<Uint8Array>;
+    const forwardSafeText = (text: string): void => {
+      if (!text) return;
+      if (!gotFirst) {
+        gotFirst = true;
+        opts.onFirstToken();
+      }
+      full += text;
+      opts.onToken(text);
+    };
+    const handleDelta = (delta: string): boolean => {
+      const split = splitSafeStreamText(pendingControlToken + delta);
+      pendingControlToken = split.pending;
+      forwardSafeText(split.safe);
+      return split.stopped;
+    };
     for await (const chunk of stream) {
       buffer += decoder.decode(chunk, { stream: true });
       const lines = buffer.split('\n');
@@ -335,13 +395,10 @@ async function streamAttempt(
         } catch {
           continue;
         }
-        if (delta) {
-          if (!gotFirst) {
-            gotFirst = true;
-            opts.onFirstToken();
-          }
-          full += delta;
-          opts.onToken(delta);
+        if (delta && handleDelta(delta)) {
+          // Do not forward model control tokens or their continuation.
+          controller.abort();
+          return { ok: full.length > 0, reply: full };
         }
       }
     }
@@ -355,19 +412,14 @@ async function streamAttempt(
             choices?: Array<{ delta?: { content?: string } }>;
           };
           const delta = parsed.choices?.[0]?.delta?.content ?? '';
-          if (delta) {
-            if (!gotFirst) {
-              gotFirst = true;
-              opts.onFirstToken();
-            }
-            full += delta;
-            opts.onToken(delta);
-          }
+          if (delta && handleDelta(delta)) return { ok: full.length > 0, reply: full };
         } catch {
           // ignore trailing garbage
         }
       }
     }
+    // A harmless partial marker at the end is ordinary text, so release it.
+    forwardSafeText(pendingControlToken);
     // NOTE: no recordModelResult here — the streaming race aborts the loser
     // mid-flight, and an aborted-healthy provider must not count as failure.
     return { ok: full.length > 0, reply: full };

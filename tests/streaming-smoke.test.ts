@@ -50,6 +50,27 @@ describe('streaming smoke', () => {
     });
   });
 
+  it('does not forward a control token split across streamed chunks', async () => {
+    primeAuth('u1');
+    mockFetch.mockResolvedValue(
+      sseResponse([
+        'data: {"choices":[{"delta":{"content":"Baki sab kaam"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":" ho jayega.<|end"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"oftext|>Okay! Morse code?"}}]}\n\n',
+      ])
+    );
+
+    const res = await request(app)
+      .post('/api/chat?stream=1')
+      .set(authHeader())
+      .send({ message: 'Fir baki sab manage kese hoga', personality: 'Father' });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Baki sab kaam ho jayega.');
+    expect(res.text).not.toContain('<|endoftext|>');
+    expect(res.text).not.toContain('Morse code');
+  });
+
   it('sends error event when all providers fail', async () => {
     primeAuth('u1');
     mockFetch.mockResolvedValue({

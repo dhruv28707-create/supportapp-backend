@@ -57,6 +57,24 @@ describe('Chat endpoints (the 404 regression)', () => {
     });
   });
 
+  it('removes a leaked model end token and its runaway continuation', async () => {
+    primeAuth('u1');
+    mockFetch.mockResolvedValue(
+      jsonResponse({
+        choices: [{ message: { content: 'Baki sab kaam ho jayega.<|endoftext|>Okay! ... Morse code?' } }],
+      })
+    );
+
+    const res = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'Fir baki sab manage kese hoga', personality: 'Father' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reply).toBe('Baki sab kaam ho jayega.');
+    expect(JSON.parse(String(mockFetch.mock.calls[0][1]?.body)).stop).toContain('<|endoftext|>');
+  });
+
   it('consumes NO quota when the AI upstream fails (503)', async () => {
     primeAuth('u1');
     mockFetch.mockResolvedValue(jsonResponse({ error: { message: 'overloaded' } }, 500));
