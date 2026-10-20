@@ -9,6 +9,6 @@
     "moduleResolution": "node",
     "types": ["node"]
   },
-  "include": ["src/**/*", "api/**/*", "scripts/**/*", "tests/**/*"],
+  "include": ["src/**/*", "api/**/*", "tests/**/*"],
   "exclude": ["node_modules", "dist"]
 }

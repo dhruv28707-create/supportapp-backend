@@ -25,7 +25,6 @@ Other scripts:
 | `npm run build` | Compile `src/` → `dist/` |
 | `npm run lint` | Lint `src/` with ESLint (includes type-aware rules) |
 | `npm run typecheck` | Type-check without emitting (`tsc --noEmit`) |
-| `npm run sanity` | Run `scripts/sanity-check.ts` (verifies tier prices/mappings) |
 | `npm start` | Run the compiled Express app from `dist/` |
 
 Deploy on Vercel: the functions in `api/` are compiled by Vercel's runtime; set all env vars in Project Settings.
