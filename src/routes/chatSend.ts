@@ -100,6 +100,15 @@ const MODEL_STOP_MARKERS = ['<|endoftext|>', '<|im_end|>', '<|end|>'];
 // Bound on the legacy `messages[]` fallback so one request can't force the
 // server to scan an unbounded array.
 const MAX_LEGACY_MESSAGES = 50;
+// Keep enough recent turns for a natural conversation without letting one
+// request create an unbounded model context or bill.
+const MAX_CONTEXT_MESSAGES = 16;
+const MAX_CONTEXT_CHARACTERS = 12_000;
+
+interface ChatHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 /** Remove an accidental model control token and everything after it. */
 function removeModelContinuation(text: string): string {
@@ -134,6 +143,46 @@ function splitSafeStreamText(text: string): { safe: string; pending: string; sto
     pending: text.slice(text.length - pendingLength),
     stopped: false,
   };
+}
+
+/**
+ * Keeps recent client-supplied conversation turns. System messages are never
+ * accepted from clients, and the current user message is always appended once.
+ */
+function buildConversationHistory(rawHistory: unknown, latestUserMessage: string): ChatHistoryMessage[] {
+  if (!Array.isArray(rawHistory)) {
+    return [{ role: 'user', content: latestUserMessage }];
+  }
+
+  const valid: ChatHistoryMessage[] = [];
+  for (const item of rawHistory) {
+    if (!item || typeof item !== 'object') continue;
+    const { role, content } = item as { role?: unknown; content?: unknown };
+    if ((role !== 'user' && role !== 'assistant') || typeof content !== 'string') continue;
+    const trimmedContent = content.trim();
+    if (trimmedContent.length === 0 || trimmedContent.length > MAX_MESSAGE_LENGTH) continue;
+    valid.push({ role, content: trimmedContent });
+  }
+
+  // If `messages` already contains the current turn, discard it and append a
+  // single trusted copy below. If no separate `message` was supplied, ignore
+  // any malformed trailing assistant turn after the last user message.
+  const lastUserIndex = valid.map((entry) => entry.role).lastIndexOf('user');
+  const beforeCurrent =
+    lastUserIndex >= 0 && valid[lastUserIndex]?.content === latestUserMessage
+      ? valid.slice(0, lastUserIndex)
+      : valid;
+
+  const selected: ChatHistoryMessage[] = [];
+  let characters = latestUserMessage.length;
+  for (let index = beforeCurrent.length - 1; index >= 0; index--) {
+    const entry = beforeCurrent[index];
+    if (selected.length >= MAX_CONTEXT_MESSAGES - 1) break;
+    if (characters + entry.content.length > MAX_CONTEXT_CHARACTERS) break;
+    characters += entry.content.length;
+    selected.unshift(entry);
+  }
+  return [...selected, { role: 'user', content: latestUserMessage }];
 }
 
 // Provider circuit breakers (per-instance, in-memory). After N consecutive
@@ -469,15 +518,15 @@ async function handleChatSend(
   };
 
   // --- Input validation (with legacy-app compatibility) ---
-  // Older app builds sent { messages: [...] } instead of { message }. Accept
-  // both, using the latest user turn. Capped so a giant array can't be used
-  // to burn CPU parsing unbounded JSON.
+  // Clients may send a current `message` plus recent `messages` history.
+  // History is capped before parsing so one request cannot create an
+  // unbounded model context.
+  if (Array.isArray(body.messages) && body.messages.length > MAX_LEGACY_MESSAGES) {
+    sendJson(res, 400, { error: 'Too many messages in one request' });
+    return;
+  }
   let rawMessage: unknown = body.message;
   if (typeof rawMessage !== 'string' && Array.isArray(body.messages) && body.messages.length > 0) {
-    if (body.messages.length > MAX_LEGACY_MESSAGES) {
-      sendJson(res, 400, { error: 'Too many messages in one request' });
-      return;
-    }
     const legacyMessages = body.messages as Array<{ role?: unknown; content?: unknown } | null>;
     // Legacy apps sent full alternating history — prefer the latest user turn.
     for (let i = legacyMessages.length - 1; i >= 0; i--) {
@@ -693,9 +742,12 @@ async function handleChatSend(
   }
 
   const systemPrompt = buildSystemPrompt(personality, religionSubType);
+  const conversationHistory = isStranger
+    ? [{ role: 'user' as const, content: trimmed }]
+    : buildConversationHistory(body.messages, trimmed);
   const messages = [
     { role: 'system' as const, content: systemPrompt },
-    { role: 'user' as const, content: trimmed },
+    ...conversationHistory,
   ];
 
   // --- Streaming fast path (?stream=1 or SSE accept) ---

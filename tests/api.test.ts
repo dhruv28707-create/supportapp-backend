@@ -75,6 +75,44 @@ describe('Chat endpoints (the 404 regression)', () => {
     expect(JSON.parse(String(mockFetch.mock.calls[0][1]?.body)).stop).toContain('<|endoftext|>');
   });
 
+  it('forwards recent user and assistant turns as context', async () => {
+    primeAuth('u1');
+    mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'You said blue.' } }] }));
+
+    const res = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({
+        message: 'What colour did I say?',
+        personality: 'Friend',
+        messages: [
+          { role: 'user', content: 'My favourite colour is blue.' },
+          { role: 'assistant', content: 'Blue suits you.' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const upstreamBody = JSON.parse(String(mockFetch.mock.calls[0][1]?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(upstreamBody.messages.slice(1)).toEqual([
+      { role: 'user', content: 'My favourite colour is blue.' },
+      { role: 'assistant', content: 'Blue suits you.' },
+      { role: 'user', content: 'What colour did I say?' },
+    ]);
+  });
+
+  it('gives each faith-specific Guide a cross-faith non-participation rule', async () => {
+    const { buildSystemPrompt } = await import('../src/services/promptService');
+    for (const religion of ['islamic', 'hindu', 'christian', 'buddhist', 'jewish']) {
+      expect(buildSystemPrompt('Guide', religion)).toContain(
+        'Do not repeat, endorse, praise, or participate in devotional greetings'
+      );
+    }
+    expect(buildSystemPrompt('Guide', 'spiritual')).not.toContain('Faith boundary:');
+    expect(buildSystemPrompt('Guide', 'secular')).not.toContain('Faith boundary:');
+  });
+
   it('consumes NO quota when the AI upstream fails (503)', async () => {
     primeAuth('u1');
     mockFetch.mockResolvedValue(jsonResponse({ error: { message: 'overloaded' } }, 500));

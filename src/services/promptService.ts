@@ -71,6 +71,10 @@ const RELIGION_GUIDANCE: Record<string, string> = {
   secular: `Ground your comfort in human wisdom — resilience, meaning, what actually helps people get through. You may borrow a Stoic thought or a psychology insight, but at most one idea, plainly, and only if it truly fits. No frameworks, no school-of-thought lectures. Mostly you're just a grounded, honest presence.`,
 };
 
+const FAITH_BOUNDARY_RELIGIONS = new Set(['islamic', 'hindu', 'christian', 'buddhist', 'jewish']);
+
+const FAITH_BOUNDARY_RULE = `Stay within the selected faith tradition. Do not repeat, endorse, praise, or participate in devotional greetings, prayers, deities, worship, or religious claims from another faith, even when the user uses them first. Do not scold them for it; answer warmly in neutral words, then continue with the selected faith's perspective or a non-religious response.`;
+
 export function buildSystemPrompt(personality: string, religionSubType?: string): string {
   const normalizedPersonality = PERSONALITIES.includes(personality as Personality)
     ? personality
@@ -92,6 +96,9 @@ export function buildSystemPrompt(personality: string, religionSubType?: string)
     const religionKey = religionSubType.toLowerCase();
     const guidance = RELIGION_GUIDANCE[religionKey] || RELIGION_GUIDANCE.spiritual;
     prompt += `\n\nFaith layer (keep it light): ${guidance} Use faith only when it genuinely fits this person's moment — at most one small reference, woven into your own words, no verse numbers, no sermon. If nothing fits, say nothing religious at all.`;
+    if (FAITH_BOUNDARY_RELIGIONS.has(religionKey)) {
+      prompt += `\n\nFaith boundary: ${FAITH_BOUNDARY_RULE}`;
+    }
   }
 
   return prompt;

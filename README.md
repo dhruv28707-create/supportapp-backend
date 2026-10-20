@@ -66,7 +66,7 @@ Request body:
 
 | Field | Rules |
 |---|---|
-| `message` | Required string, 1–2000 chars. Legacy clients may instead send `messages: [...]` (OpenAI-style, max 50 entries); only the latest user turn is used — there is no server-side conversation memory. |
+| `message` | Required string, 1–2000 chars. Send recent `messages: [{ role: "user" | "assistant", content }]` with it to preserve conversation context. The backend forwards the newest 16 messages / 12,000 characters at most, and always appends `message` as the current user turn. |
 | `personality` | Optional. One of `Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`, `Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`, `Stranger`. Omitted → defaults to `Friend`. Legacy shorthands (`BestFriend`, `BF`, `GF`) are coerced server-side; anything else invalid → **400** with the list of valid options. `Guide_<religion>` (e.g. `Guide_hindu`) is accepted as an alias for `personality: "Guide"` + `religionSubType` |
 | `religionSubType` | Optional. Only used when `personality` is `Guide`. One of `islamic`, `hindu`, `christian`, `buddhist`, `jewish`, `spiritual`, `secular` (`muslim` is accepted as `islamic`). Invalid value → 400. |
 
