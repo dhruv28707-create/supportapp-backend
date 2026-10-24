@@ -19,8 +19,17 @@ export async function getUsageHandler(req: AuthenticatedRequest, res: Response):
   const uid = req.user!.uid;
 
   try {
-    const { plan, messageCount, lastResetAt, expiresAt, isTrial, trialEndsAt, trialUsed } =
-      await checkAndResetOnly(uid);
+    const {
+      plan,
+      messageCount,
+      lastResetAt,
+      expiresAt,
+      isTrial,
+      trialEndsAt,
+      trialUsed,
+      isDeveloper,
+      unlimited,
+    } = await checkAndResetOnly(uid, req.user!.developer === true);
 
     const limit = PLAN_CONFIG[plan].limit;
     const refreshMs = PLAN_CONFIG[plan].refreshMs;
@@ -61,6 +70,8 @@ export async function getUsageHandler(req: AuthenticatedRequest, res: Response):
       trialEndsAt,
       trialUsed,
       trialAvailable,
+      isDeveloper,
+      unlimited,
       uiHints: {
         showQuotaInUsageOnly: true,
         hideQuotaInLobby: true,

@@ -7,9 +7,10 @@ rules_version = '2';
 // content into Firebase Console > Firestore > Rules).
 //
 // Design notes:
-// - There is NO god-account / developer-email / isDeveloper override. Admin
-//   access belongs to the Admin SDK (server code), which bypasses these
-//   rules entirely — that is the only privileged path.
+// - Developer/admin access is server-side only (Admin SDK + signed custom
+//   claim or the server env allowlist). There is NO client-writable developer
+//   override: users/{uid}.isDeveloper/developer/unlimited are protected, and
+//   subscriptions is server-only. The /api/developer/* routes enforce this.
 // - Everything not explicitly matched below is DENIED. Do not add a catch
 //   -all "admin-only" fallback: a deliberate deny is louder than a silent
 //   one and never hides access bugs.
@@ -124,9 +125,9 @@ service cloud.firestore {
     // If a write changes any of these, the whole write is rejected.
     function protectedUserFields() {
       return [
-        'tier', 'plan', 'role', 'isDeveloper', 'developer', 'premium',
-        'isAdmin', 'admin', 'messageCount', 'messagesUsed', 'expiresAt',
-        'razorpayOrderId', 'lastOrderId', 'subscriptionStatus',
+        'tier', 'plan', 'role', 'isDeveloper', 'developer', 'unlimited',
+        'premium', 'isAdmin', 'admin', 'messageCount', 'messagesUsed',
+        'expiresAt', 'razorpayOrderId', 'lastOrderId', 'subscriptionStatus',
       ];
     }
 
@@ -136,7 +137,7 @@ service cloud.firestore {
     // separately required to be present and 'free' by the create rule).
     function protectedUserFieldsExceptTier() {
       return [
-        'plan', 'role', 'isDeveloper', 'developer', 'premium',
+        'plan', 'role', 'isDeveloper', 'developer', 'unlimited', 'premium',
         'isAdmin', 'admin', 'messageCount', 'messagesUsed', 'expiresAt',
         'razorpayOrderId', 'lastOrderId', 'subscriptionStatus',
       ];

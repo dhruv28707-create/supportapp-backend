@@ -209,6 +209,11 @@ export async function startUltimateTrial(uid: string): Promise<TrialGrant> {
     const snap = await tx.get(subRef);
     const data = snap.exists ? snap.data() || {} : {};
 
+    if (data.isDeveloper === true || data.developer === true) {
+      // Developer accounts already have Ultimate; don't consume their trial.
+      throw new TrialNotAllowedError('already_subscribed');
+    }
+
     if (data.trialUsed === true) {
       throw new TrialNotAllowedError('trial_already_used');
     }

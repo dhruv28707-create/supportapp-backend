@@ -1,8 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import { auth } from '../config/firebaseAdmin';
+import { isDeveloperAllowlisted } from '../services/developerService';
 
 export interface AuthenticatedRequest extends Request {
-  user?: { uid: string; email: string };
+  user?: { uid: string; email: string; developer: boolean };
 }
 
 /**
@@ -24,7 +25,9 @@ function firebaseErrorCode(error: unknown): string | null {
   return null;
 }
 
-async function verifyIdTokenWithRetry(token: string): Promise<{ uid: string; email: string }> {
+async function verifyIdTokenWithRetry(
+  token: string
+): Promise<{ uid: string; email: string; developer: boolean }> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= USER_NOT_FOUND_RETRY_DELAYS_MS.length; attempt++) {
     if (attempt > 0) {
@@ -38,7 +41,15 @@ async function verifyIdTokenWithRetry(token: string): Promise<{ uid: string; ema
       // revoked (auth.revokeRefreshTokens) — this is what makes account
       // deletion able to invalidate future API access for stolen/old tokens.
       const decodedToken = await auth.verifyIdToken(token, true);
-      return { uid: decodedToken.uid, email: decodedToken.email || '' };
+      const email = decodedToken.email || '';
+      return {
+        uid: decodedToken.uid,
+        email,
+        // Signed claim (set by scripts/grant-developer.ts) or the server-side
+        // env allowlist. The Firestore flag is checked only on admin routes.
+        developer:
+          decodedToken.developer === true || isDeveloperAllowlisted(decodedToken.uid, email),
+      };
     } catch (error) {
       lastError = error;
       if (firebaseErrorCode(error) !== 'auth/user-not-found') throw error;

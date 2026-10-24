@@ -15,8 +15,17 @@ export async function getUserPlanHandler(req: AuthenticatedRequest, res: Respons
   const uid = req.user!.uid;
 
   try {
-    const { plan, messageCount, lastResetAt, expiresAt, isTrial, trialEndsAt, trialUsed } =
-      await checkAndResetOnly(uid);
+    const {
+      plan,
+      messageCount,
+      lastResetAt,
+      expiresAt,
+      isTrial,
+      trialEndsAt,
+      trialUsed,
+      isDeveloper,
+      unlimited,
+    } = await checkAndResetOnly(uid, req.user!.developer === true);
 
     const limit = PLAN_CONFIG[plan].limit;
     const refreshMs = PLAN_CONFIG[plan].refreshMs;
@@ -60,6 +69,8 @@ export async function getUserPlanHandler(req: AuthenticatedRequest, res: Respons
       messagesTotal: limit,
       quotaPercent,
       showRefillTimer,
+      isDeveloper,
+      unlimited,
     });
   } catch (error) {
     console.error('User plan error:', error);

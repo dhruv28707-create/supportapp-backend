@@ -15,6 +15,10 @@ export interface UserMessageState {
   trialEndsAt: number | null;
   /** Permanent: the account has consumed its one free trial. */
   trialUsed: boolean;
+  /** Server-verified developer account: premium access, no quota writes. */
+  isDeveloper: boolean;
+  /** Developer accounts are never quota-limited. */
+  unlimited: boolean;
 }
 
 interface SubscriptionState {
@@ -25,6 +29,29 @@ interface SubscriptionState {
   isTrial: boolean;
   trialEndsAt: number | null;
   trialUsed: boolean;
+  isDeveloper: boolean;
+  unlimited: boolean;
+}
+
+/** Plan reported for developer accounts; all personas are unlocked. */
+const DEVELOPER_PLAN: PlanType = 'ultimate';
+
+function developerSubscriptionState(): SubscriptionState {
+  return {
+    plan: DEVELOPER_PLAN,
+    messageCount: 0,
+    lastResetAt: Date.now(),
+    expiresAt: null,
+    isTrial: false,
+    trialEndsAt: null,
+    trialUsed: false,
+    isDeveloper: true,
+    unlimited: true,
+  };
+}
+
+function developerMessageState(): UserMessageState {
+  return { ...developerSubscriptionState() };
 }
 
 function toEpochMs(value: unknown): number | null {
@@ -59,6 +86,8 @@ function normalizeState(data: Record<string, unknown>): SubscriptionState {
     isTrial: data.isTrial === true,
     trialEndsAt: toEpochMs(data.trialEndsAt),
     trialUsed: data.trialUsed === true,
+    isDeveloper: data.isDeveloper === true || data.developer === true,
+    unlimited: data.unlimited === true,
   };
 }
 
@@ -77,6 +106,11 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
   const userSnap = await db.collection('users').doc(uid).get();
   if (userSnap.exists) {
     const userData = (userSnap.data() || {}) as Record<string, unknown>;
+    // Developer flag on the profile is server-only (rules protect it). This
+    // covers a freshly granted account before its ID token is refreshed.
+    if (userData.isDeveloper === true || userData.developer === true) {
+      return developerSubscriptionState();
+    }
     const legacy = normalizeState(userData);
     const orderId =
       typeof userData.razorpayOrderId === 'string' ? userData.razorpayOrderId : null;
@@ -101,11 +135,14 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
     isTrial: false,
     trialEndsAt: null,
     trialUsed: false,
+    isDeveloper: false,
+    unlimited: false,
   };
 }
 
 /** Applies subscription expiry: an expired paid plan is downgraded to free. */
 function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
+  if (state.isDeveloper || state.unlimited) return state;
   if (
     state.plan !== DEFAULT_PLAN &&
     state.expiresAt !== null &&
@@ -132,9 +169,15 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
  * Effective plan (expiry applied, window refreshed) without consuming
  * anything. Used for read-only decisions like persona gating.
  */
-export async function getPlanState(uid: string): Promise<UserMessageState> {
+export async function getPlanState(
+  uid: string,
+  developer = false
+): Promise<UserMessageState> {
+  if (developer) return developerMessageState();
+
   const now = Date.now();
   const state = applyExpiry(await loadSubscriptionState(uid), now);
+  if (state.isDeveloper || state.unlimited) return developerMessageState();
   const config = PLAN_CONFIG[state.plan];
 
   let messageCount = state.messageCount;
@@ -152,6 +195,8 @@ export async function getPlanState(uid: string): Promise<UserMessageState> {
     isTrial: state.isTrial,
     trialEndsAt: state.trialEndsAt,
     trialUsed: state.trialUsed,
+    isDeveloper: state.isDeveloper,
+    unlimited: state.unlimited,
   };
 }
 
@@ -163,13 +208,20 @@ export async function getPlanState(uid: string): Promise<UserMessageState> {
  * and collapse under burst load. A hard concurrent burst can overshoot the
  * limit slightly — acceptable for a chat quota; availability matters more.
  */
-export async function consumeMessage(uid: string): Promise<{ success: true }> {
+export async function consumeMessage(
+  uid: string,
+  developer = false
+): Promise<{ success: true }> {
+  if (developer) return { success: true };
+
   const now = Date.now();
 
   // getPlanState's window-refresh would mask whether the stored window
   // actually rolled over, so load raw state here.
   const raw = await loadSubscriptionState(uid);
   const state = applyExpiry(raw, now);
+  // Developer premium is virtual: never write quota counters for it.
+  if (state.isDeveloper || state.unlimited) return { success: true };
   const downgraded = state.plan !== raw.plan || state.expiresAt !== raw.expiresAt;
   const config = PLAN_CONFIG[state.plan];
 
@@ -224,10 +276,16 @@ export async function consumeMessage(uid: string): Promise<{ success: true }> {
  * Read path for GET /api/user/plan: current state, persisting a rolled-over
  * window or expiry downgrade best-effort so other endpoints see it too.
  */
-export async function checkAndResetOnly(uid: string): Promise<UserMessageState> {
+export async function checkAndResetOnly(
+  uid: string,
+  developer = false
+): Promise<UserMessageState> {
+  if (developer) return developerMessageState();
+
   const now = Date.now();
   const raw = await loadSubscriptionState(uid);
   const state = applyExpiry(raw, now);
+  if (state.isDeveloper || state.unlimited) return developerMessageState();
   const config = PLAN_CONFIG[state.plan];
   const downgraded = state.plan !== raw.plan || state.expiresAt !== raw.expiresAt;
 
@@ -287,5 +345,7 @@ export async function checkAndResetOnly(uid: string): Promise<UserMessageState> 
     isTrial: state.isTrial,
     trialEndsAt: state.trialEndsAt,
     trialUsed: state.trialUsed,
+    isDeveloper: state.isDeveloper,
+    unlimited: state.unlimited,
   };
 }

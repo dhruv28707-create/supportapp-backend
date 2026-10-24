@@ -191,6 +191,20 @@ export class MockCollectionRef {
   limit(n: number): MockQuery {
     return new MockQuery(this.fs, this.path, [], n);
   }
+
+  /** Mirrors Firestore's AggregateQuery.count().get(). */
+  count(): { get: () => Promise<{ data: () => { count: number } }> } {
+    const fs = this.fs;
+    const path = this.path;
+    return {
+      get: async () => ({ data: () => ({ count: fs.docsIn(path).length }) }),
+    };
+  }
+
+  startAfter(doc: string | { id?: string; ref?: { id?: string } }): MockQuery {
+    const docId = typeof doc === 'string' ? doc : doc.id ?? doc.ref?.id ?? '';
+    return new MockQuery(this.fs, this.path, [], null, docId);
+  }
 }
 
 interface Filter {
@@ -216,7 +230,9 @@ export class MockQuery {
     return new MockQuery(this.fs, this.collectionPath, this.filters, n, this.startAfterId);
   }
 
-  startAfter(docId: string): MockQuery {
+  startAfter(doc: string | { id?: string; ref?: { id?: string } }): MockQuery {
+    const docId =
+      typeof doc === 'string' ? doc : doc.id ?? doc.ref?.id ?? '';
     return new MockQuery(this.fs, this.collectionPath, this.filters, this.limitCount, docId);
   }
 

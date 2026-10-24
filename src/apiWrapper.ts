@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { enforceCors } from './config/cors';
 import { authMiddleware, AuthenticatedRequest } from './middleware/authMiddleware';
+import { requireDeveloper } from './middleware/developerMiddleware';
 
 type HttpMethod = 'GET' | 'POST' | 'DELETE';
 
@@ -78,4 +79,19 @@ export function protectedEndpoint(method: HttpMethod, routeHandler: RouteHandler
 
     await runHandler(method, routeHandler, req as AuthenticatedRequest, res);
   };
+}
+
+/**
+ * Protected endpoint plus the developer gate. Used by the read-only
+ * /api/developer/* Vercel functions; normal users receive 403.
+ */
+export function developerEndpoint(method: HttpMethod, routeHandler: RouteHandler) {
+  return protectedEndpoint(method, async (req, res) => {
+    let allowed = false;
+    await requireDeveloper(req, res, () => {
+      allowed = true;
+    });
+    if (!allowed) return;
+    await routeHandler(req, res);
+  });
 }

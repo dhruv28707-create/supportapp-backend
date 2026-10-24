@@ -8,6 +8,7 @@ import {
   getActiveSubscriptionExpiry,
   revokeUserTokens,
 } from '../services/accountDeletionService';
+import { isDeveloperAccount } from '../services/developerService';
 
 const RATE_LIMIT_MAX = 3;
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
@@ -24,6 +25,17 @@ export async function deleteAccountHandler(
   res: Response
 ): Promise<void> {
   const uid = req.user!.uid;
+
+  // Guard the admin account against accidental deletion from the app. The
+  // operator can revoke developer status first (scripts/grant-developer.ts
+  // --revoke) and then delete normally.
+  if (await isDeveloperAccount(uid, req.user!.email, req.user!.developer)) {
+    res.status(403).json({
+      error: 'Developer accounts cannot be deleted from the app. Revoke developer status first.',
+      code: 'developer_account',
+    });
+    return;
+  }
 
   try {
     await consumeRateLimit(`delete-account:${uid}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);

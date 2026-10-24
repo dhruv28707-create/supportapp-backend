@@ -7,6 +7,7 @@ import { enforceOrderIpThrottle } from '../services/chatClientThrottle';
 import { extractClientIp } from '../utils/request';
 import { razorpay } from '../services/razorpayClient';
 import { PAYMENTS_COLLECTION } from '../services/subscriptionService';
+import { isDeveloperAccount } from '../services/developerService';
 
 const ORDER_RATE_LIMIT_MAX = 10;
 const ORDER_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
@@ -19,6 +20,15 @@ const MAX_PENDING_ORDERS = 5;
 export async function paymentOrderHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
   // uid comes from the verified Firebase token — never from the request body.
   const uid = req.user!.uid;
+
+  // Developer accounts already have every plan; never create a real charge.
+  if (await isDeveloperAccount(uid, req.user!.email, req.user!.developer)) {
+    res.status(409).json({
+      error: 'Developer accounts already have full access. No purchase needed.',
+      code: 'developer_account',
+    });
+    return;
+  }
 
   const { tier } = (req.body || {}) as { tier?: unknown };
 

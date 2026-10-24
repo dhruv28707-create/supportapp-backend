@@ -13,6 +13,7 @@ import {
   TRIAL_PLAN,
   getTrialEligibilityWindowDays,
 } from '../constants';
+import { isDeveloperAccount } from '../services/developerService';
 
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
@@ -28,6 +29,16 @@ export async function trialStartHandler(
   res: Response
 ): Promise<void> {
   const uid = req.user!.uid;
+
+  // Developer accounts already have Ultimate; don't consume their one trial.
+  if (await isDeveloperAccount(uid, req.user!.email, req.user!.developer)) {
+    res.status(409).json({
+      error: 'Developer accounts already have full access. No trial needed.',
+      code: 'developer_account',
+      plan: TRIAL_PLAN,
+    });
+    return;
+  }
 
   // Per-uid backstop against hammering.
   try {

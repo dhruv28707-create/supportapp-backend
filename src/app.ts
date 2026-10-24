@@ -13,6 +13,7 @@ import { deleteAccountHandler } from './routes/accountDelete';
 import { diagnoseHandler } from './routes/diagnose';
 import { trialStartHandler } from './routes/trialStart';
 import { plansHandler } from './routes/plans';
+import { developerRouter } from './routes/developer';
 import { isOriginAllowed } from './config/cors';
 import { db } from './config/firebaseAdmin';
 
@@ -70,6 +71,10 @@ export function createApp(): express.Express {
   app.get('/api/diagnose', diagnoseHandler);
 
   app.get('/api/plans', plansHandler);
+
+  // Read-only developer/admin API. Every route inside is gated by
+  // requireDeveloper (signed claim / env allowlist / protected Firestore flag).
+  app.use('/api/developer', authMiddleware, developerRouter);
 
   app.get('/api/user/plan', authMiddleware, getUserPlanHandler);
   // /api/user/plan is legacy compat; new clients use /api/user/usage.

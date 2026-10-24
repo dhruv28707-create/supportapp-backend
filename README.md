@@ -25,6 +25,7 @@ Other scripts:
 | `npm run build` | Compile `src/` → `dist/` |
 | `npm run lint` | Lint `src/` with ESLint (includes type-aware rules) |
 | `npm run typecheck` | Type-check without emitting (`tsc --noEmit`) |
+| `npm run developer:grant -- --email <addr>` | Grant developer/admin access (see below) |
 | `npm start` | Run the compiled Express app from `dist/` |
 
 Deploy on Vercel: the functions in `api/` are compiled by Vercel's runtime; set all env vars in Project Settings.
@@ -249,6 +250,51 @@ Delete the authenticated user's account server-side. **Auth required** (uid come
 
 Diagnostics — **disabled by default.** Set `ENABLE_DIAGNOSE=true` to enable (do this only temporarily; it reveals which secrets are configured and `?test=1` / `?rzp=1` trigger real paid-provider calls). Disabled → 404.
 
+## Developer account
+
+A developer account is a normal Firebase Auth user granted server-side developer
+status. It gets **Ultimate + unlimited chat quota for free** and read-only access
+to `/api/developer/*` for inspecting the database and provider-key usage.
+
+Grant (the Firebase Auth user must already exist):
+
+```bash
+npm run developer:grant -- --email you@example.com
+# or: npm run developer:grant -- --uid <firebase-uid>
+# revoke:
+npm run developer:grant -- --email you@example.com --revoke
+```
+
+The script sets a signed `developer: true` custom claim plus protected Firestore
+flags; the client must call `getIdToken(true)` afterwards. For the very first
+account you can instead set `DEVELOPER_EMAILS` / `DEVELOPER_UIDS` in the server
+env. Clients can never grant themselves developer status — Firestore rules
+protect `isDeveloper`/`developer`/`unlimited` and `subscriptions` is server-only.
+
+Developer behaviour:
+
+- `/api/user/plan` and `/api/user/usage` return `plan: "ultimate"`,
+  `isDeveloper: true`, `unlimited: true`; chat quota is never consumed.
+- Payment and trial requests return **409** `{ code: "developer_account" }`.
+- Account deletion returns **403** `{ code: "developer_account" }` (revoke first).
+- Normal users are unaffected; developer endpoints return **403**
+  `{ code: "developer_only" }` for them.
+
+Read-only endpoints (all require auth + developer status):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/developer/overview` | Environment, collection counts, plans, provider/key status |
+| GET | `/api/developer/users?limit=25&pageToken=` | Firebase Auth users (paginated) |
+| GET | `/api/developer/users/:uid` | Auth record, profile, subscription, effective plan, recent payments |
+| GET | `/api/developer/collections` | Read-only collection allowlist |
+| GET | `/api/developer/collections/:name?limit=25&uid=&cursor=` | Read docs from an allowlisted collection |
+| GET | `/api/developer/provider-usage` | OpenRouter key usage/limits, Groq config, Razorpay mode |
+
+See [docs/DEVELOPER_ACCOUNT.md](./docs/DEVELOPER_ACCOUNT.md) for the full setup,
+endpoint shapes, and the frontend integration checklist (developer badge, hidden
+paywall/trial, admin screens, token refresh, error codes).
+
 ## Frontend integration notes
 
 - Chat is **stateless per request**: send one `message` at a time, plus optional recent `messages` history (the backend forwards the newest 16 turns / 12,000 characters and always appends `message` as the current user turn).
@@ -257,10 +303,11 @@ Diagnostics — **disabled by default.** Set `ENABLE_DIAGNOSE=true` to enable (d
 - Refresh plan/quota from `GET /api/user/plan` after app resume or payment success.
 - Account deletion: do NOT delete Firestore docs from the client first (the rules deny it — `[firestore/permission-denied]`). Call `POST /api/payment-cancel` if there is an active subscription, then `DELETE /api/account`, then just `auth().signOut()`. The backend wipes all server-side data, including the Firebase Auth account and chat history — `currentUser.delete()` after the API call throws `[auth/no-current-user]`. If an older build still calls it, catch `auth/no-current-user` / `auth/user-not-found` and treat them as success.
 - Free trial: when `GET /api/user/plan` returns `trialAvailable: true`, show a "Start 5 days of Ultimate free" CTA that calls `POST /api/trial/start`. While `isTrial` is true, surface `trialEndsAt` (e.g. "Trial ends in 3 days"). Once `isTrial` flips back to false, fetch `GET /api/plans` and render the free / pro / ultimate **choice cards** (a cancel or trial end takes the user straight there). Treat a 409 `trial_already_used` / `already_subscribed` as "hide the CTA".
+- Developer accounts: when `/api/user/plan` or `/api/user/usage` returns `isDeveloper: true`, show a developer badge, hide upgrade/trial/paywall CTAs and quota/refill UI (show "Unlimited"), and expose the read-only developer screens. Treat 409 `developer_account` from payment/trial as "already has full access"; 403 `developer_account` from account deletion means developer status must be revoked server-side first. Full checklist: [docs/DEVELOPER_ACCOUNT.md](./docs/DEVELOPER_ACCOUNT.md).
 
 ## Environment variables
 
-See [.env.example](./.env.example) for the annotated full list (Firebase Admin, OpenRouter/Groq keys with optional model overrides, Razorpay keys/webhook secret, `ALLOWED_ORIGINS`, `CHAT_COLLECTIONS`, `ENABLE_DIAGNOSE`). The example file contains no real secrets; never commit `.env`.
+See [.env.example](./.env.example) for the annotated full list (Firebase Admin, OpenRouter/Groq keys with optional model overrides, Razorpay keys/webhook secret, `ALLOWED_ORIGINS`, `CHAT_COLLECTIONS`, `ENABLE_DIAGNOSE`, `DEVELOPER_EMAILS`/`DEVELOPER_UIDS`). The example file contains no real secrets; never commit `.env`.
 
 ## Security model
 
@@ -268,4 +315,4 @@ See [.env.example](./.env.example) for the annotated full list (Firebase Admin, 
 - **Auth**: every protected endpoint verifies the Firebase ID token (`Authorization: Bearer <token>`, revocation-checked); `uid` is always derived from the token, never from request data. Missing/invalid → **401**; authenticated but not authorized for the resource → **403**.
 - **Plan trust**: plan/quota state lives in the server-only `subscriptions` collection and is granted exclusively through signature-verified payments (checkout verify + webhook, both cross-checked against Razorpay's API). A client-writable `users/{uid}` doc can never grant premium by itself.
 - **Profile creation**: the `users/{uid}` create rule requires `tier: 'free'` and rejects any protected field (`plan`, `role`, `isDeveloper`, `premium`, quota/expiry/payment fields). A client that creates the profile without `tier: 'free'` gets `permission-denied`; the backend never creates this doc.
-- **Firestore rules** ([firestore.rules](./firestore.rules)): no god-account/developer override; `users/{uid}` protects `tier`/`plan`/`role`/`isDeveloper`/`premium`/quota fields from client mutation; `payments` and `subscriptions` are server-only writes; anything not explicitly matched is denied. Deploy with `firebase deploy --only firestore:rules`.
+- **Firestore rules** ([firestore.rules](./firestore.rules)): no client-writable developer override; `users/{uid}` protects `tier`/`plan`/`role`/`isDeveloper`/`developer`/`premium`/`unlimited`/quota fields from client mutation; `payments` and `subscriptions` are server-only writes; anything not explicitly matched is denied. Developer status is granted only by the server script or `DEVELOPER_EMAILS`/`DEVELOPER_UIDS`, never by a client. Deploy with `firebase deploy --only firestore:rules`.

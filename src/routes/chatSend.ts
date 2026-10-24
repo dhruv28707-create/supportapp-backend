@@ -510,6 +510,7 @@ async function handleChatSend(
 ): Promise<void> {
   // uid is always taken from the verified Firebase token — never from the body/query.
   const uid = req.user!.uid;
+  const isDeveloper = req.user!.developer === true;
   const body = (req.body || {}) as {
     message?: unknown;
     messages?: unknown;
@@ -620,7 +621,7 @@ async function handleChatSend(
   const t0 = Date.now();
   let planState: UserMessageState;
   try {
-    planState = await getPlanState(uid);
+    planState = await getPlanState(uid, isDeveloper);
   } catch (error) {
     console.error(`[chat uid=${uid}] Plan lookup failed:`, error);
     sendJson(res, 500, { error: 'Internal server error' });
@@ -648,7 +649,7 @@ async function handleChatSend(
 
   // --- Quota gate (before spending AI money) ---
   const quotaConfig = PLAN_CONFIG[planState.plan];
-  if (planState.messageCount >= quotaConfig.limit) {
+  if (!planState.unlimited && planState.messageCount >= quotaConfig.limit) {
     sendJson(res, 429, {
       limitReached: true,
       code: 'quota_exhausted',
@@ -764,6 +765,7 @@ async function handleChatSend(
       t0,
       tPlan,
       tChecks,
+      isDeveloper,
     });
     return;
   }
@@ -881,7 +883,7 @@ async function handleChatSend(
   // awaited — otherwise serverless freeze can drop the increment. The
   // pre-AI gate above is the instant 429; this is pure accounting.
   try {
-    await consumeMessage(uid);
+    await consumeMessage(uid, isDeveloper);
   } catch (error: unknown) {
     if (error instanceof LimitReachedError) {
       console.warn(`[chat uid=${uid}] Quota filled during generation (reply already sent)`);
@@ -903,6 +905,7 @@ interface StreamContext {
   t0: number;
   tPlan: number;
   tChecks: number;
+  isDeveloper: boolean;
 }
 
 /**
@@ -913,7 +916,7 @@ interface StreamContext {
  * a breaker failure.
  */
 async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<void> {
-  const { uid, personality, religionSubType, isStranger, messages } = ctx;
+  const { uid, personality, religionSubType, isStranger, messages, isDeveloper } = ctx;
   const { primary, fallback, clientGoneSignal } = ctx;
 
   const targetsToTry = primary.model === fallback.model ? [primary] : [primary, fallback];
@@ -1069,7 +1072,7 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
       // would farm free previews.
       if (fullReply) {
         try {
-          await consumeMessage(uid);
+          await consumeMessage(uid, isDeveloper);
         } catch (error: unknown) {
           if (!(error instanceof LimitReachedError)) {
             console.error(`[chat uid=${uid}] Message quota consume failed:`, error);
@@ -1110,7 +1113,7 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
     // drop the write. Tokens already streamed, so this only delays `done`
     // by one Firestore write.
     try {
-      await consumeMessage(uid);
+      await consumeMessage(uid, isDeveloper);
     } catch (error: unknown) {
       if (error instanceof LimitReachedError) {
         console.warn(`[chat uid=${uid}] Quota filled during generation (stream already sent)`);

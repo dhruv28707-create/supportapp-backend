@@ -37,6 +37,8 @@ export const mockAuth = {
   deleteUser: vi.fn(),
   // Used for the free-trial new-account eligibility check (metadata.creationTime).
   getUser: vi.fn(),
+  // Used by the developer user browser.
+  listUsers: vi.fn(),
 };
 
 export const mockAppCheck = {
@@ -114,6 +116,8 @@ export function resetAll(): void {
   mockAuth.revokeRefreshTokens.mockReset();
   mockAuth.deleteUser.mockReset();
   mockAuth.getUser.mockReset();
+  mockAuth.listUsers.mockReset();
+  mockAuth.listUsers.mockResolvedValue({ users: [], pageToken: undefined });
   // Default: a brand-new account, so trial eligibility passes unless a test
   // overrides creationTime to simulate an old account.
   mockAuth.getUser.mockResolvedValue({
