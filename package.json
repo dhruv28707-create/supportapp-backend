@@ -1,7 +1,7 @@
 {
   "name": "supportapp-backend",
   "version": "1.0.0",
-  "description": "SAFESPACE Backend - Emotional Support App with 12 AI Personalities",
+  "description": "SAFESPACE Backend - Emotional Support App with 13 AI Personalities",
   "main": "dist/index.js",
   "engines": {
     "node": ">=18"

@@ -23,6 +23,18 @@ import { db } from './config/firebaseAdmin';
 export function createApp(): express.Express {
   const app = express();
 
+  // Reject disallowed browser origins up front, matching the Vercel wrapper
+  // (enforceCors). The cors middleware alone only omits the response header,
+  // which still serves the request.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const origin = req.headers.origin;
+    if (origin && !isOriginAllowed(origin)) {
+      res.status(403).json({ error: 'Origin not allowed' });
+      return;
+    }
+    next();
+  });
+
   app.use(
     cors({
       origin: (origin, callback) => {

@@ -62,16 +62,16 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
   }
 
   // Pending-order cap: finish or abandon existing orders before minting more.
+  // Query only pending rows and stop at the cap — scanning every payment the
+  // user ever made would get slower for every order as history grows.
   try {
     const pending = await db
       .collection(PAYMENTS_COLLECTION)
       .where('uid', '==', uid)
+      .where('status', '==', 'pending')
+      .limit(MAX_PENDING_ORDERS)
       .get();
-    let pendingCount = 0;
-    for (const doc of pending.docs) {
-      if (doc.data()?.status === 'pending') pendingCount += 1;
-    }
-    if (pendingCount >= MAX_PENDING_ORDERS) {
+    if (pending.size >= MAX_PENDING_ORDERS) {
       res.status(429).json({ error: 'Too many pending orders. Complete or wait before creating another.' });
       return;
     }

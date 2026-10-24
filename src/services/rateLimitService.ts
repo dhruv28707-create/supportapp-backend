@@ -60,30 +60,32 @@ export async function consumeRateLimit(
 
     // Window reset must write count 1 (not increment the stale count), or a
     // reset window would keep growing from the old value (e.g. 3 -> 4).
-    // Non-transactional by design (see doc comment above).
-    const write =
-      windowExpired || !snap.exists
-        ? ref.set(
-            {
-              count: 1,
-              windowStart,
-              updatedAt: now,
-            },
-            { merge: true }
-          )
-        : ref.set(
-            {
-              count: FieldValue.increment(1),
-              windowStart,
-              updatedAt: now,
-            },
-            { merge: true }
-          );
-    // Surface async write failures in logs without blocking the caller —
-    // the limiter is fail-open by design.
-    void write.catch((error: unknown) => {
+    // The write is awaited: on serverless a fire-and-forget write can be
+    // dropped when the invocation freezes, silently undercounting the window.
+    // A failed write stays fail-open — the request was already admitted.
+    try {
+      if (windowExpired || !snap.exists) {
+        await ref.set(
+          {
+            count: 1,
+            windowStart,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+      } else {
+        await ref.set(
+          {
+            count: FieldValue.increment(1),
+            windowStart,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+      }
+    } catch (error) {
       console.error('Rate limiter write failed (already admitted request):', error);
-    });
+    }
 
     return { count: count + 1, windowStart };
   } catch (error) {

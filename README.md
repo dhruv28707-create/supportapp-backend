@@ -85,6 +85,10 @@ Success response:
 
 `reply` and `choices[0].message.content` carry the same text; `choices` exists for legacy clients. Echoed `personality`/`religionSubType` let you confirm which persona answered.
 
+`POST /api/chat/send` is an alias of `POST /api/chat`.
+
+**Streaming:** pass `?stream=1` or send `Accept: text/event-stream` to receive Server-Sent Events: `{ "token": "..." }` chunks, then one `{ "done": true, "reply": ..., "personality": ..., "choices": [...] }`, then `data: [DONE]`. If all providers fail after the stream has started, the error arrives as an `{ "error": ..., "code": "ai_upstream_error" }` event with HTTP 200 (headers are already sent).
+
 Errors:
 
 | Status | Meaning |
@@ -104,6 +108,10 @@ Current plan and quota state. **Auth required.**
 {
   "plan": "free",
   "messagesRemaining": 17,
+  "messagesUsed": 3,
+  "messagesTotal": 20,
+  "quotaPercent": 0.15,
+  "showRefillTimer": false,
   "nextRefreshAt": 1756160000000,
   "refillInMs": 17400000,
   "refreshHours": 5,
@@ -116,9 +124,15 @@ Current plan and quota state. **Auth required.**
 }
 ```
 
+`messagesUsed`/`messagesTotal`/`quotaPercent` (0..1) expose the raw quota state. `showRefillTimer` is true only once at least 75% of the quota is used (or the limit is hit), so clients can hide the countdown for fresh accounts.
+
 `isTrial`/`trialEndsAt` describe an active 5-day Ultimate trial; `trialUsed` is permanent (true once the account has ever trialed); `trialAvailable` is the client hint for showing the "Start free trial" CTA (only true for a free account that is still new and has never trialed — the trial endpoint re-checks server-side).
 
 Plan limits (`src/constants.ts`): free 20 msgs / 5h · pro 80 / 4h · ultimate 200 / 2h.
+
+### GET /api/user/usage
+
+Same plan/quota data as `GET /api/user/plan` (which is kept for older clients), plus `uiHints` telling the app to surface quota only on the Usage screen. **Auth required.** New clients should prefer this endpoint.
 
 ### GET /api/plans
 
@@ -137,7 +151,7 @@ Public pricing catalog for the post-trial choice cards. No auth.
 }
 ```
 
-Render each option as a card. Paid cards pass `tier` to `POST /api/payment-order`; the free card needs no request (the account is already on free once the trial ends). Prices come from `TIER_PRICES`, so the shown amount always matches what the server charges.
+Render each option as a card. Paid cards pass `tier` to `POST /api/payment-order`; the free card needs no request (the account is already on free once the trial ends). Prices come from `TIER_PRICES`, so the shown amount always matches what the server charges. Each option also includes `description`, `highlights`, `messageLimit`, and `refreshHours` for rendering.
 
 ### POST /api/trial/start
 
@@ -237,7 +251,7 @@ Diagnostics — **disabled by default.** Set `ENABLE_DIAGNOSE=true` to enable (d
 
 ## Frontend integration notes
 
-- Chat is **stateless per request**: send one `message` at a time. If you want conversational context, keep history client-side — but note the backend currently uses only your latest message plus the persona system prompt.
+- Chat is **stateless per request**: send one `message` at a time, plus optional recent `messages` history (the backend forwards the newest 16 turns / 12,000 characters and always appends `message` as the current user turn).
 - On `429` with `limitReached: true`, show a "limit reached" screen counting down to `nextRefreshAt` (epoch ms).
 - Payment flow: `POST /api/payment-order` → open Razorpay Checkout with `orderId`, `amount`, `currency`, `keyId` → on success call `POST /api/payment-verify` with the three checkout fields. Safe to retry verify on network failures.
 - Refresh plan/quota from `GET /api/user/plan` after app resume or payment success.
@@ -253,4 +267,5 @@ See [.env.example](./.env.example) for the annotated full list (Firebase Admin, 
 - **Secrets** live only in server-side env vars (`.env` locally, Vercel dashboard in production). `.env` is git-ignored; a full-history scan pattern check is recommended after any suspected leak, and any leaked key must be rotated (Razorpay keys in the Razorpay dashboard, Firebase keys in Google Cloud, AI keys with their providers).
 - **Auth**: every protected endpoint verifies the Firebase ID token (`Authorization: Bearer <token>`, revocation-checked); `uid` is always derived from the token, never from request data. Missing/invalid → **401**; authenticated but not authorized for the resource → **403**.
 - **Plan trust**: plan/quota state lives in the server-only `subscriptions` collection and is granted exclusively through signature-verified payments (checkout verify + webhook, both cross-checked against Razorpay's API). A client-writable `users/{uid}` doc can never grant premium by itself.
+- **Profile creation**: the `users/{uid}` create rule requires `tier: 'free'` and rejects any protected field (`plan`, `role`, `isDeveloper`, `premium`, quota/expiry/payment fields). A client that creates the profile without `tier: 'free'` gets `permission-denied`; the backend never creates this doc.
 - **Firestore rules** ([firestore.rules](./firestore.rules)): no god-account/developer override; `users/{uid}` protects `tier`/`plan`/`role`/`isDeveloper`/`premium`/quota fields from client mutation; `payments` and `subscriptions` are server-only writes; anything not explicitly matched is denied. Deploy with `firebase deploy --only firestore:rules`.

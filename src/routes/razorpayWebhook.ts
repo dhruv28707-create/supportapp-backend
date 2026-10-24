@@ -23,6 +23,7 @@ interface PaymentCheck {
   status: string;
   order_id: string;
   amount: number | string;
+  currency: string;
 }
 
 /** Reads the raw request body when the platform did not pre-parse it. */
@@ -40,7 +41,10 @@ function readRawBody(req: Request): Promise<Buffer | null> {
 }
 
 export async function razorpayWebhookHandler(req: Request, res: Response): Promise<void> {
-  const signature = req.headers['x-razorpay-signature'] as string | undefined;
+  // Node types this header as string | string[]; normalize before hashing so
+  // a repeated header can't throw inside Buffer.from.
+  const signatureHeader = req.headers['x-razorpay-signature'];
+  const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
 
   if (!signature) {
     res.status(400).json({ error: 'Missing signature' });
@@ -158,6 +162,7 @@ export async function razorpayWebhookHandler(req: Request, res: Response): Promi
     if (
       rzPayment.status !== 'captured' ||
       rzPayment.order_id !== orderId ||
+      rzPayment.currency !== 'INR' ||
       Number(rzPayment.amount) !== Number(record.amount)
     ) {
       console.warn('Webhook payment validation failed:', { orderId, rzStatus: rzPayment.status });

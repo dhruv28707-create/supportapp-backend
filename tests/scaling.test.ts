@@ -148,6 +148,30 @@ describe('deletion purge pagination (Fix #4)', () => {
     expect(remaining[0].id).toBe('other');
   });
 
+  it('honors CHAT_COLLECTIONS for every chat layout', async () => {
+    const request = (await import('supertest')).default;
+    const { createApp } = await import('../src/app');
+
+    vi.stubEnv('CHAT_COLLECTIONS', 'myChats');
+    primeAuth('u1');
+    mockDb.collection('myChats').doc('a').set({ uid: 'u1', text: 'x' }, { merge: false });
+    mockDb.collection('myChats').doc('u1').set({ messages: [] }, { merge: false });
+    mockDb
+      .collection('users')
+      .doc('u1')
+      .collection('myChats')
+      .doc('m')
+      .set({ text: 'x' }, { merge: false });
+
+    const app = createApp();
+    const res = await request(app).delete('/api/account').set(authHeader());
+
+    expect(res.status).toBe(200);
+    expect(mockDb.get('myChats/a')).toBeUndefined();
+    expect(mockDb.get('myChats/u1')).toBeUndefined();
+    expect(mockDb.get('users/u1/myChats/m')).toBeUndefined();
+  });
+
   it('paginates payments cleanup too (anonymize paid, delete pending)', async () => {
     const request = (await import('supertest')).default;
     const { createApp } = await import('../src/app');

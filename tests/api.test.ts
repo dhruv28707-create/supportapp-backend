@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import crypto from 'crypto';
 import {
   primeAuth,
   authHeader,
@@ -340,10 +341,10 @@ describe('POST /api/payment-verify', () => {
       status: 'captured',
       order_id: 'order_1',
       amount: 17900,
+      currency: 'INR',
     });
 
     process.env.RAZORPAY_KEY_SECRET = 'test_secret';
-    const crypto = await import('crypto');
     const sig = crypto
       .createHmac('sha256', 'test_secret')
       .update('order_1|pay_1')
@@ -375,6 +376,93 @@ describe('POST /api/payment-verify', () => {
       });
     expect(replay.status).toBe(200);
     expect(replay.body.alreadyVerified).toBe(true);
+  });
+
+  it('rejects an order that belongs to another uid', async () => {
+    primeAuth('u1');
+    mockDb.collection('payments').doc('order_other').set(
+      { uid: 'u2', tier: 'pro_monthly', amount: 17900, status: 'pending' },
+      { merge: false }
+    );
+    const sig = crypto
+      .createHmac('sha256', 'test_secret')
+      .update('order_other|pay_other')
+      .digest('hex');
+
+    const res = await request(app)
+      .post('/api/payment-verify')
+      .set(authHeader())
+      .send({
+        razorpay_order_id: 'order_other',
+        razorpay_payment_id: 'pay_other',
+        razorpay_signature: sig,
+      });
+
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an amount that does not match the order', async () => {
+    primeAuth('u1');
+    mockDb.collection('payments').doc('order_amt').set(
+      { uid: 'u1', tier: 'pro_monthly', amount: 17900, status: 'pending' },
+      { merge: false }
+    );
+    const { default: razorpayConstructor } = await import('razorpay');
+    const instance = new razorpayConstructor({ key_id: 'k', key_secret: 's' });
+    (instance.payments.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 'captured',
+      order_id: 'order_amt',
+      amount: 100,
+      currency: 'INR',
+    });
+    const sig = crypto
+      .createHmac('sha256', 'test_secret')
+      .update('order_amt|pay_amt')
+      .digest('hex');
+
+    const res = await request(app)
+      .post('/api/payment-verify')
+      .set(authHeader())
+      .send({
+        razorpay_order_id: 'order_amt',
+        razorpay_payment_id: 'pay_amt',
+        razorpay_signature: sig,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Amount mismatch');
+  });
+
+  it('rejects a payment in the wrong currency', async () => {
+    primeAuth('u1');
+    mockDb.collection('payments').doc('order_cur').set(
+      { uid: 'u1', tier: 'pro_monthly', amount: 17900, status: 'pending' },
+      { merge: false }
+    );
+    const { default: razorpayConstructor } = await import('razorpay');
+    const instance = new razorpayConstructor({ key_id: 'k', key_secret: 's' });
+    (instance.payments.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 'captured',
+      order_id: 'order_cur',
+      amount: 17900,
+      currency: 'USD',
+    });
+    const sig = crypto
+      .createHmac('sha256', 'test_secret')
+      .update('order_cur|pay_cur')
+      .digest('hex');
+
+    const res = await request(app)
+      .post('/api/payment-verify')
+      .set(authHeader())
+      .send({
+        razorpay_order_id: 'order_cur',
+        razorpay_payment_id: 'pay_cur',
+        razorpay_signature: sig,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Currency mismatch');
   });
 });
 
@@ -453,6 +541,26 @@ describe('DELETE /api/account', () => {
     expect(res.body.deleted.pendingPayments).toBe(1);
     expect(mockDb.get('payments/order_paid')).toMatchObject({ uid: 'deleted:u1' });
     expect(mockDb.get('payments/order_pending')).toBeUndefined();
+  });
+
+  it('returns 500 when Firebase Auth deletion fails (no lying success)', async () => {
+    primeAuth('u1');
+    mockAuth.deleteUser.mockRejectedValue({ code: 'auth/internal-error' });
+
+    const res = await request(app).delete('/api/account').set(authHeader());
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('auth_delete_failed');
+  });
+
+  it('treats an already-missing Auth user as success', async () => {
+    primeAuth('u1');
+    mockAuth.deleteUser.mockRejectedValue({ code: 'auth/user-not-found' });
+
+    const res = await request(app).delete('/api/account').set(authHeader());
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
   });
 });
 

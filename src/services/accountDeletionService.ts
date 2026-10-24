@@ -253,8 +253,14 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
 
   try {
     const override = getChatCollectionsOverride();
+    // CHAT_COLLECTIONS replaces auto-discovery for every layout, not just the
+    // top-level uid-field shape.
     const topLevelCandidates: readonly string[] =
       override.length > 0 ? override : CHAT_STORAGE_SHAPES.UID_FIELD_COLLECTIONS;
+    const perUserDocCandidates: readonly string[] =
+      override.length > 0 ? override : CHAT_STORAGE_SHAPES.PER_USER_DOC_COLLECTIONS;
+    const userSubcollectionCandidates: readonly string[] =
+      override.length > 0 ? override : CHAT_STORAGE_SHAPES.USER_DOC_SUBCOLLECTIONS;
 
     // Shape A: top-level collection with an owner uid field per doc.
     const shapeAProbes = topLevelCandidates.flatMap((collection) =>
@@ -285,7 +291,7 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
     );
 
     // Shape B: one document per user holding the whole conversation.
-    const shapeBProbes = CHAT_STORAGE_SHAPES.PER_USER_DOC_COLLECTIONS.map((collection) =>
+    const shapeBProbes = perUserDocCandidates.map((collection) =>
       withTimeout(
         db.collection(collection)
           .doc(uid)
@@ -320,9 +326,8 @@ async function deleteChatHistory(uid: string): Promise<{ docsDeleted: number; do
       'users/{uid} subcollections'
     )
       .then(async (subcollections) => {
-        const knownChatSubs = CHAT_STORAGE_SHAPES.USER_DOC_SUBCOLLECTIONS as readonly string[];
         const subProbes = subcollections
-          .filter((sub) => knownChatSubs.includes(sub))
+          .filter((sub) => userSubcollectionCandidates.includes(sub))
           .map((sub) =>
             withTimeout(
               deleteChatDocsByQuery(db.collection('users').doc(uid).collection(sub)),

@@ -34,6 +34,51 @@ describe('payment-order throttle-first', () => {
   });
 });
 
+describe('payment-order pending cap', () => {
+  it('rejects at 5 pending orders without calling Razorpay', async () => {
+    primeAuth('u1');
+    for (let i = 0; i < 5; i++) {
+      mockDb.collection('payments').doc(`p${i}`).set(
+        { uid: 'u1', tier: 'pro_monthly', amount: 17900, status: 'pending' },
+        { merge: false }
+      );
+    }
+
+    const res = await request(app)
+      .post('/api/payment-order')
+      .set(authHeader())
+      .send({ tier: 'pro_monthly' });
+
+    expect(res.status).toBe(429);
+    expect(mockRazorpayOrdersCreate).not.toHaveBeenCalled();
+  });
+
+  it('does not count paid history against the pending cap', async () => {
+    primeAuth('u1');
+    for (let i = 0; i < 4; i++) {
+      mockDb.collection('payments').doc(`pending${i}`).set(
+        { uid: 'u1', tier: 'pro_monthly', amount: 17900, status: 'pending' },
+        { merge: false }
+      );
+    }
+    for (let i = 0; i < 10; i++) {
+      mockDb.collection('payments').doc(`paid${i}`).set(
+        { uid: 'u1', tier: 'pro_monthly', amount: 17900, status: 'paid' },
+        { merge: false }
+      );
+    }
+    mockRazorpayOrdersCreate.mockResolvedValue({ id: 'order_new', amount: 17900, currency: 'INR' });
+
+    const res = await request(app)
+      .post('/api/payment-order')
+      .set(authHeader())
+      .send({ tier: 'pro_monthly' });
+
+    expect(res.status).toBe(200);
+    expect(mockRazorpayOrdersCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('grant is transactional + idempotent', () => {
   it('double-grant on the same order grants once (no expiry extension)', async () => {
     const { grantPlanAndMarkPaid } = await import('../src/services/subscriptionService');
@@ -98,6 +143,7 @@ describe('webhook', () => {
       status: 'captured',
       order_id: 'order_w1',
       amount: 17900,
+      currency: 'INR',
     });
     const body = JSON.stringify({
       event: 'payment.captured',
@@ -137,6 +183,30 @@ describe('diagnose gate', () => {
     expect(enabled.body.primaryProvider).toBe('groq');
     expect(enabled.body.fallbackModel).toBe('custom/primary');
     expect(enabled.body.primaryModel).toBe('openai/gpt-oss-20b');
+  });
+
+  it('requires the admin token for live probes', async () => {
+    vi.stubEnv('ENABLE_DIAGNOSE', 'true');
+
+    const noToken = await request(app).get('/api/diagnose?rzp=1');
+    expect(noToken.status).toBe(403);
+    expect(noToken.body.rzpTest).toMatchObject({ ok: false, error: 'Forbidden' });
+
+    const wrongToken = await request(app)
+      .get('/api/diagnose?rzp=1')
+      .set('x-diagnose-token', 'wrong');
+    expect(wrongToken.status).toBe(403);
+
+    vi.stubEnv('DIAGNOSE_ADMIN_TOKEN', 'diag-secret');
+    mockRazorpayOrdersCreate.mockResolvedValue({ id: 'order_diag', amount: 100, currency: 'INR' });
+    const allowed = await request(app)
+      .get('/api/diagnose?rzp=1')
+      .set('x-diagnose-token', 'diag-secret');
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.rzpTest).toMatchObject({ ok: true, orderId: 'order_diag' });
+
+    const groqNoToken = await request(app).get('/api/diagnose?test=1');
+    expect(groqNoToken.status).toBe(403);
   });
 });
 

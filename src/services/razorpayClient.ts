@@ -26,11 +26,17 @@ function buildClient(): Razorpay {
   }
 }
 
-// Lazy singleton via Proxy: keys are read on first use, not import, so env
-// stubs and rotation take effect without a restart.
+// Lazy singleton via Proxy: keys are read on first use, not import. The
+// cached client is rebuilt when the configured keys change, so env rotation
+// takes effect without a restart.
 let cached: Razorpay | null = null;
+let cachedKey = '';
 function real(): Razorpay {
-  if (!cached) cached = buildClient();
+  const key = `${process.env.RAZORPAY_KEY_ID ?? ''}\u0000${process.env.RAZORPAY_KEY_SECRET ?? ''}`;
+  if (!cached || cachedKey !== key) {
+    cached = buildClient();
+    cachedKey = key;
+  }
   return cached;
 }
 

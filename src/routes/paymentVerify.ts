@@ -20,6 +20,7 @@ interface PaymentCheck {
   status: string;
   order_id: string;
   amount: number | string;
+  currency: string;
 }
 
 export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -137,6 +138,12 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
     }
     if (Number(payment.amount) !== Number(record.amount)) {
       res.status(400).json({ error: 'Amount mismatch' });
+      return;
+    }
+    // Orders are always created in INR; a different currency means the
+    // payment entity does not match the order we priced.
+    if (payment.currency !== 'INR') {
+      res.status(400).json({ error: 'Currency mismatch' });
       return;
     }
 

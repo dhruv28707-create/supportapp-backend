@@ -89,27 +89,31 @@ export async function enforceIpThrottle(
       throw new RateLimitExceededError(windowMs - (now - windowStart));
     }
 
-    const write =
-      windowExpired || !snap.exists
-        ? ref.set(
-            {
-              count: 1,
-              windowStart,
-              updatedAt: now,
-            },
-            { merge: true }
-          )
-        : ref.set(
-            {
-              count: FieldValue.increment(1),
-              windowStart,
-              updatedAt: now,
-            },
-            { merge: true }
-          );
-    void write.catch((error: unknown) => {
+    // Awaited so a serverless freeze can't drop the increment (which would
+    // let a burst through); a failed write stays fail-open.
+    try {
+      if (windowExpired || !snap.exists) {
+        await ref.set(
+          {
+            count: 1,
+            windowStart,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+      } else {
+        await ref.set(
+          {
+            count: FieldValue.increment(1),
+            windowStart,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+      }
+    } catch (error) {
       console.error('IP throttle write failed (already admitted request):', error);
-    });
+    }
   } catch (error) {
     if (error instanceof RateLimitExceededError) throw error;
     console.error('[fail-open] IP throttle error (allowing request):', error);

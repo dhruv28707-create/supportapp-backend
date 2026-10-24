@@ -187,6 +187,10 @@ export class MockCollectionRef {
     if (op !== '==') throw new Error(`MockFirestore: unsupported where op '${op}'`);
     return new MockQuery(this.fs, this.path, [{ field, value }]);
   }
+
+  limit(n: number): MockQuery {
+    return new MockQuery(this.fs, this.path, [], n);
+  }
 }
 
 interface Filter {

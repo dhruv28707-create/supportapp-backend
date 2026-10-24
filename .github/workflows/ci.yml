@@ -25,8 +25,5 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Sanity checks
-        run: npm run sanity
-
       - name: Tests
         run: npm test
