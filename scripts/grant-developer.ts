@@ -39,14 +39,19 @@ function readHidden(question: string): Promise<string> {
       return;
     }
 
+    process.stdout.write(question);
     const rl = readline.createInterface({ input: stdin, output: process.stdout, terminal: true });
     const muted = rl as unknown as { stdoutMuted?: boolean; _writeToOutput?: (output: string) => void };
     muted.stdoutMuted = true;
     muted._writeToOutput = function (output: string): void {
-      if (!muted.stdoutMuted) process.stdout.write(output);
+      if (muted.stdoutMuted) {
+        if (!output.includes('\r') && !output.includes('\n')) process.stdout.write('*');
+      } else {
+        process.stdout.write(output);
+      }
     };
 
-    rl.question(question, (answer) => {
+    rl.question('', (answer) => {
       muted.stdoutMuted = false;
       process.stdout.write('\n');
       rl.close();
