@@ -14,6 +14,7 @@ import { diagnoseHandler } from './routes/diagnose';
 import { trialStartHandler } from './routes/trialStart';
 import { plansHandler } from './routes/plans';
 import { developerRouter } from './routes/developer';
+import { vercelLogDrainHandler } from './routes/vercelLogDrain';
 import { isOriginAllowed } from './config/cors';
 import { db } from './config/firebaseAdmin';
 
@@ -55,6 +56,13 @@ export function createApp(): express.Express {
     '/api/webhooks/razorpay',
     express.raw({ type: 'application/json' }),
     razorpayWebhookHandler
+  );
+
+  // Vercel Log Drains receiver (raw body needed for HMAC verification).
+  app.post(
+    '/api/logs/vercel',
+    express.raw({ type: '*/*', limit: '2mb' }),
+    vercelLogDrainHandler
   );
 
   app.use(express.json());

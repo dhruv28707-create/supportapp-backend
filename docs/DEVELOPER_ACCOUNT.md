@@ -115,6 +115,36 @@ developer screen can show them without access to the Vercel log stream:
   on `expiresAt` (Firebase console → Firestore → appLogs → TTL) so logs age
   out automatically.
 
+### Importing Vercel runtime logs (Log Drains, Pro plan)
+
+The structured events above cover every significant outcome, but the raw
+Vercel console stream (`console.log`/`console.error` lines) can also be
+imported into the same `appLogs` collection via a Log Drain:
+
+1. Set the server env vars and redeploy:
+   ```dotenv
+   VERCEL_LOG_DRAIN_ENABLED=true
+   VERCEL_LOG_DRAIN_SECRET=<random 32+ char secret>
+   ```
+2. Vercel dashboard → team **Drains** → **Create Drain** → type **Logs**,
+   destination **Custom URL**:
+   - Endpoint: `https://<your-backend-domain>/api/logs/vercel`
+   - Format: NDJSON (or JSON — both are supported)
+   - Signature secret: the same `VERCEL_LOG_DRAIN_SECRET` value.
+   - Sources: Runtime logs only (build logs are usually not worth the writes).
+3. Vercel sends a one-time unsigned probe that the endpoint answers by echoing
+   `x-vercel-verify`; after that each delivery is HMAC-SHA1 signed and stored
+   as `vercel_log` events (level, source, vercel timestamp, truncated message).
+
+Notes:
+- The endpoint rejects everything when the secret is not configured — no open
+  log sink.
+- Each delivery writes at most 200 docs; `[logs] ...` lines are skipped so log
+  write failures cannot feed back into themselves.
+- Every raw console line becomes a Firestore write. To cut cost, narrow the
+  drain's source/sampling config in Vercel, or leave the drain off and rely on
+  the structured events only.
+
 ## 4. Frontend changes required
 
 ### 4.1 Detect developer mode
