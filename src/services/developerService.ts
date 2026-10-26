@@ -1,7 +1,13 @@
 import { auth, db } from '../config/firebaseAdmin';
 
 /** Read-only Firestore collections exposed to developer tooling. */
-const BASE_DEVELOPER_COLLECTIONS = ['users', 'subscriptions', 'payments', 'rateLimits'] as const;
+const BASE_DEVELOPER_COLLECTIONS = [
+  'users',
+  'subscriptions',
+  'payments',
+  'rateLimits',
+  'appLogs',
+] as const;
 
 export type DeveloperCollection = string;
 

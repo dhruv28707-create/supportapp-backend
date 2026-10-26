@@ -22,6 +22,7 @@ import {
 import { consumeRateLimit, RateLimitExceededError } from '../services/rateLimitService';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { extractClientIp } from '../utils/request';
+import { logAppEvent, writeAppLog } from '../services/logService';
 import {
   verifyAppCheckToken,
   isAppCheckEnforced,
@@ -650,6 +651,14 @@ async function handleChatSend(
   // --- Quota gate (before spending AI money) ---
   const quotaConfig = PLAN_CONFIG[planState.plan];
   if (!planState.unlimited && planState.messageCount >= quotaConfig.limit) {
+    await writeAppLog({
+      event: 'chat_quota_exhausted',
+      level: 'warn',
+      route: '/api/chat',
+      uid,
+      status: 429,
+      detail: { plan: planState.plan, personality, messagesUsed: planState.messageCount },
+    });
     sendJson(res, 429, {
       limitReached: true,
       code: 'quota_exhausted',
@@ -850,6 +859,13 @@ async function handleChatSend(
   // Client gave up — no quota consumed, nothing to deliver.
   if (clientGoneSignal.aborted) {
     console.warn(`[chat uid=${uid}] Client disconnected before reply — not consuming quota`);
+    logAppEvent({
+      event: 'chat_client_disconnect',
+      level: 'warn',
+      route: '/api/chat',
+      uid,
+      detail: { personality, streamed: false },
+    });
     return;
   }
 
@@ -857,6 +873,15 @@ async function handleChatSend(
     console.error(
       `[chat uid=${uid}] No reply from any provider (attempts=${attempts.length}) — returning 503 ai_upstream_error`
     );
+    await writeAppLog({
+      event: 'chat_upstream_error',
+      level: 'error',
+      route: '/api/chat',
+      uid,
+      status: 503,
+      durationMs: Date.now() - t0,
+      detail: { attempts: attempts.length, personality, streamed: false },
+    });
     sendJson(res, 503, { error: 'AI service unavailable', code: 'ai_upstream_error' });
     return;
   }
@@ -867,6 +892,23 @@ async function handleChatSend(
         `timings plan=${tPlan - t0}ms checks=${tChecks - tPlan}ms ai=${tAi - tChecks}ms total=${tAi - t0}ms`
     );
   }
+
+  // Post-reply event log: fire-and-forget so it never delays the response.
+  logAppEvent({
+    event: 'chat_reply',
+    route: '/api/chat',
+    uid,
+    status: 200,
+    durationMs: Date.now() - t0,
+    detail: {
+      model: usedTarget?.name ?? null,
+      replyLength: reply.length,
+      personality,
+      religionSubType: religionSubType ?? null,
+      isStranger,
+      isDeveloper,
+    },
+  });
 
   sendJson(res, 200, {
     reply,
@@ -926,6 +968,14 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
   if (queued.length === 0 || clientGoneSignal.aborted) {
     if (!clientGoneSignal.aborted) {
       console.error(`[chat uid=${uid}] No stream reply (no providers) — 503 ai_upstream_error`);
+      await writeAppLog({
+        event: 'chat_upstream_error',
+        level: 'error',
+        route: '/api/chat',
+        uid,
+        status: 503,
+        detail: { personality, streamed: true, attempts: 0 },
+      });
       sendJson(res, 503, { error: 'AI service unavailable', code: 'ai_upstream_error' });
     }
     return;
@@ -1091,6 +1141,14 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
       console.error(
         `[chat uid=${uid}] No stream reply from any provider — sending error event`
       );
+      await writeAppLog({
+        event: 'chat_upstream_error',
+        level: 'error',
+        route: '/api/chat',
+        uid,
+        status: 200,
+        detail: { personality, streamed: true, attempts: slots.length },
+      });
       sendEvent({ error: 'AI service unavailable', code: 'ai_upstream_error' });
       endStream();
       return;
@@ -1108,6 +1166,24 @@ async function handleStreamedChat(res: Response, ctx: StreamContext): Promise<vo
         `timings plan=${ctx.tPlan - ctx.t0}ms checks=${ctx.tChecks - ctx.tPlan}ms ` +
         `ttft=${ttft}ms total=${tAi - ctx.t0}ms`
     );
+
+    logAppEvent({
+      event: 'chat_reply',
+      route: '/api/chat',
+      uid,
+      status: 200,
+      durationMs: tAi - ctx.t0,
+      detail: {
+        model: won.name,
+        replyLength: fullReply.length,
+        ttftMs: ttft,
+        personality,
+        religionSubType: religionSubType ?? null,
+        isStranger,
+        isDeveloper,
+        streamed: true,
+      },
+    });
 
     // Persist quota before closing the stream so serverless freeze can't
     // drop the write. Tokens already streamed, so this only delays `done`

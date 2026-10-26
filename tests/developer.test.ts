@@ -121,6 +121,32 @@ describe('developer premium access', () => {
     expect(mockDb.get('subscriptions/u1')).toBeUndefined();
   });
 
+  it('unlocks paid personas when only the users-doc flag exists and a free sub doc predates the grant', async () => {
+    primeAuth('u1');
+    // Simulates a developer flag set outside the grant script (e.g. console
+    // edit) while the account already has a normal free subscription doc.
+    mockDb.collection('users').doc('u1').set({ isDeveloper: true }, { merge: false });
+    mockDb.collection('subscriptions').doc('u1').set(
+      { plan: 'free', messageCount: 20, lastResetAt: Date.now(), expiresAt: null },
+      { merge: false }
+    );
+    mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }));
+
+    const usage = await request(app).get('/api/user/usage').set(authHeader());
+    expect(usage.status).toBe(200);
+    expect(usage.body).toMatchObject({
+      plan: 'ultimate',
+      isDeveloper: true,
+      unlimited: true,
+    });
+
+    const chat = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'hi', personality: 'Wife' });
+    expect(chat.status).toBe(200);
+  });
+
   it('does not change the free-user persona gate', async () => {
     primeAuth('u1');
     seedFreeQuota(0);
@@ -297,5 +323,86 @@ describe('developer read-only API', () => {
     expect((init as { headers: Record<string, string> }).headers.Authorization).toBe(
       'Bearer test-openrouter-key'
     );
+  });
+});
+
+describe('developer logs API', () => {
+  it('rejects normal users', async () => {
+    primeAuth('u1');
+    const res = await request(app).get('/api/developer/logs').set(authHeader());
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('developer_only');
+  });
+
+  it('returns persisted chat events newest first with working filters and cursor', async () => {
+    vi.stubEnv('DEVELOPER_UIDS', 'u1');
+    primeAuth('u1');
+    mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'hi' } }] }));
+
+    // Two successful chats (chat_reply events) with different personalities.
+    await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'one', personality: 'Friend' });
+    await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'two', personality: 'Wife' });
+
+    const all = await request(app).get('/api/developer/logs').set(authHeader());
+    expect(all.status).toBe(200);
+    const replyEvents = all.body.logs.filter(
+      (log: { event: string }) => log.event === 'chat_reply'
+    );
+    expect(replyEvents.length).toBe(2);
+    // Newest first: the second chat must come before the first.
+    expect(replyEvents[0].detail.personality).toBe('Wife');
+    expect(replyEvents[1].detail.personality).toBe('Friend');
+    // Never log the user's message content.
+    expect(all.body.logs.some((log: { detail?: { replyLength?: number } }) =>
+      log.detail && typeof log.detail.replyLength === 'number'
+    )).toBe(true);
+    expect(JSON.stringify(all.body)).not.toContain('one');
+    expect(JSON.stringify(all.body)).not.toContain('"two"');
+
+    const filtered = await request(app)
+      .get('/api/developer/logs?event=chat_reply&level=info')
+      .set(authHeader());
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.count).toBe(2);
+    expect(filtered.body.logs.every((log: { event: string; level: string }) =>
+      log.event === 'chat_reply' && log.level === 'info'
+    )).toBe(true);
+
+    const emptyFilter = await request(app)
+      .get('/api/developer/logs?uid=nobody')
+      .set(authHeader());
+    expect(emptyFilter.body.count).toBe(0);
+  });
+
+  it('paginates with the numeric ts cursor', async () => {
+    vi.stubEnv('DEVELOPER_UIDS', 'u1');
+    primeAuth('u1');
+    mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'hi' } }] }));
+
+    for (const message of ['a', 'b', 'c']) {
+      await request(app)
+        .post('/api/chat')
+        .set(authHeader())
+        .send({ message, personality: 'Friend' });
+    }
+
+    const page1 = await request(app)
+      .get('/api/developer/logs?event=chat_reply&limit=2')
+      .set(authHeader());
+    expect(page1.status).toBe(200);
+    expect(page1.body.count).toBe(2);
+    expect(page1.body.nextCursor).toBeTypeOf('number');
+
+    const page2 = await request(app)
+      .get(`/api/developer/logs?event=chat_reply&limit=2&cursor=${page1.body.nextCursor}`)
+      .set(authHeader());
+    expect(page2.status).toBe(200);
+    expect(page2.body.count).toBe(1);
   });
 });

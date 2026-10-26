@@ -14,6 +14,7 @@ import {
   getTrialEligibilityWindowDays,
 } from '../constants';
 import { isDeveloperAccount } from '../services/developerService';
+import { writeAppLog } from '../services/logService';
 
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
@@ -91,6 +92,14 @@ export async function trialStartHandler(
     const grant = await startUltimateTrial(uid);
 
     console.log(`[trial-start] Ultimate trial granted uid=${uid.slice(0, 8)} for ${ULTIMATE_TRIAL_DAYS} days`);
+
+    await writeAppLog({
+      event: 'trial_started',
+      route: '/api/trial/start',
+      uid,
+      status: 200,
+      detail: { plan: grant.plan, trialDays: ULTIMATE_TRIAL_DAYS, expiresAt: grant.expiresAt },
+    });
 
     res.status(200).json({
       success: true,

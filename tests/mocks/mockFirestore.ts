@@ -192,6 +192,10 @@ export class MockCollectionRef {
     return new MockQuery(this.fs, this.path, [], n);
   }
 
+  orderBy(field: string, direction: 'asc' | 'desc' = 'asc'): MockQuery {
+    return new MockQuery(this.fs, this.path, [], null, null, field, direction === 'desc');
+  }
+
   /** Mirrors Firestore's AggregateQuery.count().get(). */
   count(): { get: () => Promise<{ data: () => { count: number } }> } {
     const fs = this.fs;
@@ -201,7 +205,10 @@ export class MockCollectionRef {
     };
   }
 
-  startAfter(doc: string | { id?: string; ref?: { id?: string } }): MockQuery {
+  startAfter(doc: string | number | { id?: string; ref?: { id?: string } }): MockQuery {
+    if (typeof doc === 'number') {
+      return new MockQuery(this.fs, this.path, [], null, null, null, false, doc);
+    }
     const docId = typeof doc === 'string' ? doc : doc.id ?? doc.ref?.id ?? '';
     return new MockQuery(this.fs, this.path, [], null, docId);
   }
@@ -218,22 +225,32 @@ export class MockQuery {
     private readonly collectionPath: string,
     private readonly filters: Filter[],
     private readonly limitCount: number | null = null,
-    private readonly startAfterId: string | null = null
+    private readonly startAfterId: string | null = null,
+    private readonly orderByField: string | null = null,
+    private readonly orderDesc = false,
+    private readonly startAfterValue: unknown = undefined
   ) {}
 
   where(field: string, op: string, value: unknown): MockQuery {
     if (op !== '==') throw new Error(`MockFirestore: unsupported where op '${op}'`);
-    return new MockQuery(this.fs, this.collectionPath, [...this.filters, { field, value }], this.limitCount, this.startAfterId);
+    return new MockQuery(this.fs, this.collectionPath, [...this.filters, { field, value }], this.limitCount, this.startAfterId, this.orderByField, this.orderDesc, this.startAfterValue);
   }
 
   limit(n: number): MockQuery {
-    return new MockQuery(this.fs, this.collectionPath, this.filters, n, this.startAfterId);
+    return new MockQuery(this.fs, this.collectionPath, this.filters, n, this.startAfterId, this.orderByField, this.orderDesc, this.startAfterValue);
   }
 
-  startAfter(doc: string | { id?: string; ref?: { id?: string } }): MockQuery {
+  orderBy(field: string, direction: 'asc' | 'desc' = 'asc'): MockQuery {
+    return new MockQuery(this.fs, this.collectionPath, this.filters, this.limitCount, this.startAfterId, field, direction === 'desc', this.startAfterValue);
+  }
+
+  startAfter(doc: string | number | { id?: string; ref?: { id?: string } }): MockQuery {
+    if (typeof doc === 'number') {
+      return new MockQuery(this.fs, this.collectionPath, this.filters, this.limitCount, null, this.orderByField, this.orderDesc, doc);
+    }
     const docId =
       typeof doc === 'string' ? doc : doc.id ?? doc.ref?.id ?? '';
-    return new MockQuery(this.fs, this.collectionPath, this.filters, this.limitCount, docId);
+    return new MockQuery(this.fs, this.collectionPath, this.filters, this.limitCount, docId, this.orderByField, this.orderDesc, this.startAfterValue);
   }
 
   async get(): Promise<MockQuerySnapshot> {
@@ -247,7 +264,26 @@ export class MockQuery {
       return this.filters.every((f) => data[f.field] === f.value);
     });
 
-    entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    if (this.orderByField) {
+      const field = this.orderByField;
+      const direction = this.orderDesc ? -1 : 1;
+      entries.sort(([aPath, aData], [bPath, bData]) => {
+        const av = (aData[field] ?? 0) as string | number;
+        const bv = (bData[field] ?? 0) as string | number;
+        const cmp = av < bv ? -1 : av > bv ? 1 : aPath < bPath ? -1 : aPath > bPath ? 1 : 0;
+        return cmp * direction;
+      });
+      if (this.startAfterValue !== undefined) {
+        const cursor = this.startAfterValue as string | number;
+        entries = entries.filter(([, data]) => {
+          const value = (data[field] ?? 0) as string | number;
+          // Firestore startAfter is exclusive.
+          return this.orderDesc ? value < cursor : value > cursor;
+        });
+      }
+    } else {
+      entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    }
     if (this.limitCount !== null) entries = entries.slice(0, this.limitCount);
 
     const docs = entries.map(([path]) => new MockDocSnapshot(new MockDocRef(this.fs, path), this.fs));

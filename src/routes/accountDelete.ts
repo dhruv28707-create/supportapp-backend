@@ -9,6 +9,7 @@ import {
   revokeUserTokens,
 } from '../services/accountDeletionService';
 import { isDeveloperAccount } from '../services/developerService';
+import { writeAppLog } from '../services/logService';
 
 const RATE_LIMIT_MAX = 3;
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
@@ -144,6 +145,20 @@ export async function deleteAccountHandler(
         firebaseAuthDeleted,
       }
     );
+
+    await writeAppLog({
+      event: 'account_deleted',
+      level: 'warn',
+      route: '/api/account',
+      uid,
+      status: 200,
+      durationMs: totalDataMs,
+      detail: {
+        chatsDeleted: summary.chatsDeleted,
+        paymentsAnonymized: summary.paymentsAnonymized,
+        firebaseAuthDeleted,
+      },
+    });
 
     res.json({
       success: true,

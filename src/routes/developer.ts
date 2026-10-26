@@ -4,6 +4,7 @@ import { PLAN_CONFIG, getPlanOptions } from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { requireDeveloper } from '../middleware/developerMiddleware';
 import { getPlanState } from '../services/messageService';
+import { listAppLogs } from '../services/logService';
 import {
   countCollection,
   getDeveloperCollections,
@@ -28,6 +29,7 @@ developerRouter.get('/users/:uid', getDeveloperUserHandler);
 developerRouter.get('/collections', getDeveloperCollectionsHandler);
 developerRouter.get('/collections/:name', getDeveloperCollectionHandler);
 developerRouter.get('/provider-usage', getDeveloperProviderUsageHandler);
+developerRouter.get('/logs', getDeveloperLogsHandler);
 
 interface DeveloperDoc {
   id: string;
@@ -250,5 +252,40 @@ export async function getDeveloperProviderUsageHandler(
   } catch (error) {
     console.error('[developer] Provider usage failed:', error);
     res.status(500).json({ error: 'Failed to load provider usage' });
+  }
+}
+
+/**
+ * Read-only app event log browser (appLogs collection, newest first).
+ * level/event/uid filters are applied in code — no composite indexes.
+ */
+export async function getDeveloperLogsHandler(
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const limit = parseLimit(req.query.limit, 50);
+    const rawCursor = Number(req.query.cursor);
+    const cursor = Number.isFinite(rawCursor) && rawCursor > 0 ? Math.floor(rawCursor) : null;
+    const level = parseString(req.query.level);
+    const event = parseString(req.query.event);
+    const uid = parseString(req.query.uid);
+
+    const { logs, nextCursor } = await listAppLogs(limit, cursor, {
+      level,
+      event,
+      uid,
+    });
+
+    res.json({
+      ok: true,
+      time: new Date().toISOString(),
+      count: logs.length,
+      logs,
+      nextCursor,
+    });
+  } catch (error) {
+    console.error('[developer] Logs read failed:', error);
+    res.status(500).json({ error: 'Failed to read logs' });
   }
 }

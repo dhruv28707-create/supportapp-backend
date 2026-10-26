@@ -11,6 +11,7 @@ import {
 } from '../services/subscriptionService';
 import { tierToPlan } from '../constants';
 import { timingSafeEqualHex } from '../utils/crypto';
+import { writeAppLog } from '../services/logService';
 
 const VERIFY_RATE_LIMIT_MAX = 20;
 const VERIFY_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
@@ -149,6 +150,14 @@ export async function paymentVerifyHandler(req: AuthenticatedRequest, res: Respo
 
     const plan = await grantPlanAndMarkPaid(uid, record.tier, razorpay_order_id, razorpay_payment_id);
     const expiresAtMs = computeExpiresAtMs(record.tier);
+
+    await writeAppLog({
+      event: 'payment_verified',
+      route: '/api/payment-verify',
+      uid,
+      status: 200,
+      detail: { tier: record.tier, plan, orderId: razorpay_order_id, paymentId: razorpay_payment_id },
+    });
 
     res.json({
       success: true,

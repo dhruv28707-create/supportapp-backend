@@ -8,6 +8,7 @@ import { extractClientIp } from '../utils/request';
 import { razorpay } from '../services/razorpayClient';
 import { PAYMENTS_COLLECTION } from '../services/subscriptionService';
 import { isDeveloperAccount } from '../services/developerService';
+import { logAppEvent, writeAppLog } from '../services/logService';
 
 const ORDER_RATE_LIMIT_MAX = 10;
 const ORDER_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
@@ -109,6 +110,15 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
       createdAt: new Date(),
     });
 
+    logAppEvent({
+      event: 'payment_order_created',
+      route: '/api/payment-order',
+      uid,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+      detail: { tier, orderId: order.id, amount: order.amount },
+    });
+
     res.json({
       orderId: order.id,
       amount: order.amount,
@@ -137,6 +147,21 @@ export async function paymentOrderHandler(req: AuthenticatedRequest, res: Respon
       rzpDescription: err.error?.description ?? null,
       raw: String(error),
       elapsedMs: Date.now() - startedAt,
+    });
+    await writeAppLog({
+      event: 'payment_order_failed',
+      level: 'error',
+      route: '/api/payment-order',
+      uid,
+      status: 500,
+      durationMs: Date.now() - startedAt,
+      detail: {
+        tier,
+        message: err.message ?? null,
+        code: err.code ?? null,
+        statusCode: err.statusCode ?? null,
+        rzpCode: err.error?.code ?? null,
+      },
     });
     res.status(500).json({ error: 'Failed to create order' });
   }

@@ -100,7 +100,22 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
   const subSnap = await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).get();
 
   if (subSnap.exists) {
-    return normalizeState(subSnap.data() || {});
+    const subState = normalizeState(subSnap.data() || {});
+    // The protected users/{uid}.isDeveloper flag outranks a subscription doc
+    // that predates a manual grant (the grant script writes both, but a flag
+    // set outside the script must still win over a stale free sub doc).
+    if (!subState.isDeveloper && !subState.unlimited) {
+      try {
+        const userSnap = await db.collection('users').doc(uid).get();
+        const userData = (userSnap.data() || {}) as Record<string, unknown>;
+        if (userData.isDeveloper === true || userData.developer === true) {
+          return developerSubscriptionState();
+        }
+      } catch (error) {
+        console.error(`[quota] Developer flag lookup failed uid=${uid.slice(0, 8)}:`, error);
+      }
+    }
+    return subState;
   }
 
   const userSnap = await db.collection('users').doc(uid).get();
