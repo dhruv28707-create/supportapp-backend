@@ -87,7 +87,8 @@ describe('messageService quota (Fix #1: atomic increment)', () => {
     const request = (await import('supertest')).default;
 
     primeAuth('u1');
-    // Free-plan cap 20 → messageCount 19 is within the atomic band.
+    // Free-plan cap 20 → messageCount 19 is right at the limit: the
+    // transactioned consume commits exactly one increment and stops there.
     mockDb.collection('subscriptions').doc('u1').set(
       { plan: 'free', messageCount: 19, lastResetAt: Date.now(), expiresAt: null },
       { merge: false }
@@ -121,7 +122,7 @@ describe('messageService quota (Fix #1: atomic increment)', () => {
     }
   });
 
-  it('far-from-limit consumes do NOT pay the transaction cost', async () => {
+  it('every consume runs transactionally with the cap checked on the in-transaction read', async () => {
     mockDb.collection('subscriptions').doc('u1').set(
       { plan: 'free', messageCount: 3, lastResetAt: Date.now(), expiresAt: null },
       { merge: false }
@@ -129,11 +130,36 @@ describe('messageService quota (Fix #1: atomic increment)', () => {
     const txSpy = vi.spyOn(mockDb, 'runTransaction');
     try {
       await consumeMessage('u1');
-      expect(txSpy).not.toHaveBeenCalled();
+      // No cheap increment fast path: every consume must re-read the count
+      // inside the transaction so the cap can never be bypassed by a burst.
+      expect(txSpy).toHaveBeenCalled();
       expect(mockDb.get('subscriptions/u1')!.messageCount).toBe(4);
     } finally {
       txSpy.mockRestore();
     }
+  });
+
+  it('hard-caps quota under a concurrent burst starting far below the limit', async () => {
+    mockDb.collection('subscriptions').doc('u1').set(
+      { plan: 'free', messageCount: 0, lastResetAt: Date.now(), expiresAt: null },
+      { merge: false }
+    );
+
+    // 40 concurrent consumes with count=0: only the free cap (20) may ever
+    // commit; the rest must be refused with LimitReachedError.
+    const results = await Promise.allSettled(
+      Array.from({ length: 40 }, () => consumeMessage('u1'))
+    );
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter(
+      (r): r is PromiseRejectedResult => r.status === 'rejected'
+    );
+    expect(fulfilled).toHaveLength(20);
+    for (const rejection of rejected) {
+      expect(rejection.reason).toMatchObject({ name: 'LimitReachedError' });
+    }
+    expect(mockDb.get('subscriptions/u1')!.messageCount).toBe(20);
   });
 });
 

@@ -23,7 +23,54 @@ import { timingSafeEqualHex } from '../utils/crypto';
  */
 
 const MAX_ENTRIES_PER_REQUEST = 200;
-const MAX_RAW_BODY_BYTES = 2 * 1024 * 1024; // Vercel batches up to ~1MB
+// Also used by app.ts as the raw wire-bytes cap for this route.
+export const MAX_RAW_BODY_BYTES = 2 * 1024 * 1024; // Vercel batches up to ~1MB compressed
+// Decompressed-size cap: gzip is a ratio amplifier, and a small signed body
+// can expand into gigabytes (a "compression bomb"). Output is streamed and
+// the stream is destroyed the moment the cap is exceeded, so peak memory is
+// bounded regardless of the expansion ratio.
+const MAX_DECOMPRESSED_BODY_BYTES = 10 * 1024 * 1024; // ~5:1 over the raw cap
+
+/** Thrown when decompression output exceeds MAX_DECOMPRESSED_BODY_BYTES. */
+class DecompressedTooLargeError extends Error {}
+
+/**
+ * Streams `raw` through gunzip, rejecting when the decompressed output size
+ * exceeds `maxBytes`. Unlike gunzipSync (no backpressure escape), the stream
+ * is destroyed mid-fill so memory stays bounded by the cap plus one chunk.
+ */
+function gunzipLimited(raw: Buffer, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const gunzip = zlib.createGunzip();
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+
+    const finish = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      gunzip.destroy();
+      reject(error);
+    };
+
+    gunzip.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        finish(new DecompressedTooLargeError('decompressed payload exceeds cap'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    gunzip.on('error', finish);
+    gunzip.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+
+    gunzip.end(raw);
+  });
+}
 
 interface VercelLogEntry {
   id?: unknown;
@@ -115,16 +162,32 @@ export async function vercelLogDrainHandler(req: Request, res: Response): Promis
     return;
   }
 
-  let bodyText: string;
-  try {
-    bodyText =
-      req.headers['content-encoding'] === 'gzip'
-        ? zlib.gunzipSync(raw).toString('utf8')
-        : raw.toString('utf8');
-  } catch {
-    res.status(400).json({ error: 'Unsupported content-encoding' });
+  // The HMAC above was computed on the raw (still-compressed) bytes, so only
+  // holders of the drain secret can ever reach decompression here. Streaming
+  // decompression (gunzipLimited) keeps a bomb payload from ballooning the
+  // function's memory regardless.
+  const contentEncoding = String(req.headers['content-encoding'] ?? '')
+    .trim()
+    .toLowerCase();
+  let bodyBuffer: Buffer;
+  if (contentEncoding === '' || contentEncoding === 'identity') {
+    bodyBuffer = raw;
+  } else if (contentEncoding === 'gzip' || contentEncoding === 'x-gzip') {
+    try {
+      bodyBuffer = await gunzipLimited(raw, MAX_DECOMPRESSED_BODY_BYTES);
+    } catch (error) {
+      if (error instanceof DecompressedTooLargeError) {
+        res.status(413).json({ error: 'Decompressed payload too large' });
+        return;
+      }
+      res.status(400).json({ error: 'Unsupported content-encoding' });
+      return;
+    }
+  } else {
+    res.status(415).json({ error: 'Unsupported content-encoding' });
     return;
   }
+  const bodyText = bodyBuffer.toString('utf8');
 
   const entries = parseDrainPayload(bodyText);
   if (entries.length === 0) {

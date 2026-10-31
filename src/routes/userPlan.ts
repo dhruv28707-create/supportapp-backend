@@ -1,14 +1,13 @@
 import { Response } from 'express';
 import { checkAndResetOnly } from '../services/messageService';
+import { isTrialEligibleByAccountAge } from '../services/trialEligibilityService';
 import {
   PLAN_CONFIG,
   DEFAULT_PLAN,
-  getTrialEligibilityWindowDays,
   getQuotaUsageFraction,
   shouldShowRefillTimer,
 } from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
-import { auth } from '../config/firebaseAdmin';
 
 export async function getUserPlanHandler(req: AuthenticatedRequest, res: Response): Promise<void> {
   // uid is always taken from the verified Firebase token — never from the client.
@@ -40,17 +39,12 @@ export async function getUserPlanHandler(req: AuthenticatedRequest, res: Respons
     const showRefillTimer = shouldShowRefillTimer(messageCount, limit, isLimitReached);
 
     // Trial CTA hint only for free, never-trialed, still-new accounts. The
-    // trial endpoint re-checks regardless of this hint.
+    // trial endpoint re-checks regardless of this hint. Account age comes
+    // from a server-only cache of the immutable creationTime — no Identity
+    // Toolkit call per request.
     let trialAvailable = false;
     if (!trialUsed && plan === DEFAULT_PLAN) {
-      try {
-        const record = await auth.getUser(uid);
-        const creationTimeMs = Date.parse(record.metadata.creationTime);
-        const windowMs = getTrialEligibilityWindowDays() * 24 * 60 * 60 * 1000;
-        trialAvailable = !Number.isNaN(creationTimeMs) && Date.now() - creationTimeMs <= windowMs;
-      } catch (error) {
-        console.error(`[user-plan] Trial eligibility lookup failed uid=${uid.slice(0, 8)}:`, error);
-      }
+      trialAvailable = await isTrialEligibleByAccountAge(uid);
     }
 
     res.json({

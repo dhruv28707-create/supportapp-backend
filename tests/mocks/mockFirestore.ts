@@ -22,8 +22,17 @@ export const FieldValue = {
 export class MockFirestore {
   private store = new Map<string, Record<string, unknown>>();
 
+  /**
+   * Transactions are serialized end-to-end (queue the whole fn, including its
+   * awaits) so concurrent transactions observe sequential commit semantics
+   * like Firestore does per document — otherwise interleaved tx reads break
+   * atomicity regression tests.
+   */
+  private txQueue: Promise<unknown> = Promise.resolve();
+
   reset(): void {
     this.store.clear();
+    this.txQueue = Promise.resolve();
   }
 
   /** Direct store access for assertions. */
@@ -93,11 +102,19 @@ export class MockFirestore {
     return [...this.store.entries()];
   }
 
-  /** Minimal runTransaction: executes fn with get/set against the same store.
-   *  Serial in tests (single-threaded), but proves the transactional call path.
+  /** Minimal runTransaction: executes fn with get/set against the same store,
+   *  serialized end-to-end so concurrent transactions commit in order.
    */
-  async runTransaction<T>(fn: (tx: MockTransaction) => Promise<T>): Promise<T> {
-    return fn(new MockTransaction(this));
+  runTransaction<T>(fn: (tx: MockTransaction) => Promise<T>): Promise<T> {
+    const run = this.txQueue.then(
+      () => fn(new MockTransaction(this)),
+      () => fn(new MockTransaction(this))
+    );
+    this.txQueue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run as Promise<T>;
   }
 }
 

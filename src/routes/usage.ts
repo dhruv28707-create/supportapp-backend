@@ -1,14 +1,13 @@
 import { Response } from 'express';
 import { checkAndResetOnly } from '../services/messageService';
+import { isTrialEligibleByAccountAge } from '../services/trialEligibilityService';
 import {
   PLAN_CONFIG,
   DEFAULT_PLAN,
-  getTrialEligibilityWindowDays,
   getQuotaUsageFraction,
   shouldShowRefillTimer,
 } from '../constants';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
-import { auth } from '../config/firebaseAdmin';
 
 /**
  * GET /api/user/usage — quota numbers for the Settings > Usage screen.
@@ -44,14 +43,7 @@ export async function getUsageHandler(req: AuthenticatedRequest, res: Response):
 
     let trialAvailable = false;
     if (!trialUsed && plan === DEFAULT_PLAN) {
-      try {
-        const record = await auth.getUser(uid);
-        const creationTimeMs = Date.parse(record.metadata.creationTime);
-        const windowMs = getTrialEligibilityWindowDays() * 24 * 60 * 60 * 1000;
-        trialAvailable = !Number.isNaN(creationTimeMs) && Date.now() - creationTimeMs <= windowMs;
-      } catch (error) {
-        console.error(`[usage] Trial eligibility lookup failed uid=${uid.slice(0, 8)}:`, error);
-      }
+      trialAvailable = await isTrialEligibleByAccountAge(uid);
     }
 
     res.json({

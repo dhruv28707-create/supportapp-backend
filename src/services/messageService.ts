@@ -1,4 +1,3 @@
-import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
 import { PLAN_CONFIG, PlanType, DEFAULT_PLAN, LimitReachedError } from '../constants';
 import { SUBSCRIPTIONS_COLLECTION, PAYMENTS_COLLECTION } from './subscriptionService';
@@ -91,13 +90,25 @@ function normalizeState(data: Record<string, unknown>): SubscriptionState {
   };
 }
 
+/** Minimal snapshot surface (satisfied by admin snapshots and tx.get()). */
+interface QuotaDocSnapshot {
+  exists: boolean;
+  data(): Record<string, unknown> | undefined;
+}
+
 /**
- * Reads subscription state from server-only `subscriptions/{uid}`. On a
- * missing doc, falls back to legacy `users/{uid}` only when backed by a
- * verified paid payment record (users docs may be client-writable).
+ * Derives raw subscription state from `subscriptions/{uid}`. On a missing
+ * doc, falls back to legacy `users/{uid}` only when backed by a verified
+ * paid payment record (users docs may be client-writable). Shared by the
+ * plain read path and the consume transaction — the transaction MUST use
+ * this same derivation so a burst cannot see different rules than the cap.
  */
-async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
-  const subSnap = await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).get();
+async function resolveSubscriptionState(
+  getDoc: (reference: FirebaseFirestore.DocumentReference) => Promise<QuotaDocSnapshot>,
+  uid: string,
+  now: number
+): Promise<SubscriptionState> {
+  const subSnap = await getDoc(db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid));
 
   if (subSnap.exists) {
     const subState = normalizeState(subSnap.data() || {});
@@ -106,8 +117,8 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
     // set outside the script must still win over a stale free sub doc).
     if (!subState.isDeveloper && !subState.unlimited) {
       try {
-        const userSnap = await db.collection('users').doc(uid).get();
-        const userData = (userSnap.data() || {}) as Record<string, unknown>;
+        const userSnap = await getDoc(db.collection('users').doc(uid));
+        const userData = userSnap.data() || {};
         if (userData.isDeveloper === true || userData.developer === true) {
           return developerSubscriptionState();
         }
@@ -118,9 +129,9 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
     return subState;
   }
 
-  const userSnap = await db.collection('users').doc(uid).get();
+  const userSnap = await getDoc(db.collection('users').doc(uid));
   if (userSnap.exists) {
-    const userData = (userSnap.data() || {}) as Record<string, unknown>;
+    const userData = userSnap.data() || {};
     // Developer flag on the profile is server-only (rules protect it). This
     // covers a freshly granted account before its ID token is refreshed.
     if (userData.isDeveloper === true || userData.developer === true) {
@@ -132,12 +143,12 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
     if (
       legacy.plan !== DEFAULT_PLAN &&
       legacy.expiresAt !== null &&
-      legacy.expiresAt > Date.now() &&
+      legacy.expiresAt > now &&
       orderId !== null
     ) {
-      const paymentSnap = await db.collection(PAYMENTS_COLLECTION).doc(orderId).get();
+      const paymentSnap = await getDoc(db.collection(PAYMENTS_COLLECTION).doc(orderId));
       if (paymentSnap.exists && paymentSnap.data()?.status === 'paid') {
-        return { ...legacy, lastResetAt: Date.now() };
+        return { ...legacy, lastResetAt: now };
       }
     }
   }
@@ -145,7 +156,7 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
   return {
     plan: DEFAULT_PLAN,
     messageCount: 0,
-    lastResetAt: Date.now(),
+    lastResetAt: now,
     expiresAt: null,
     isTrial: false,
     trialEndsAt: null,
@@ -153,6 +164,20 @@ async function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
     isDeveloper: false,
     unlimited: false,
   };
+}
+
+/** Snapshot getter over plain (non-transactional) Firestore reads. */
+function dbGetDoc(reference: FirebaseFirestore.DocumentReference): Promise<QuotaDocSnapshot> {
+  return reference.get();
+}
+
+/**
+ * Reads subscription state from server-only `subscriptions/{uid}`. On a
+ * missing doc, falls back to legacy `users/{uid}` only when backed by a
+ * verified paid payment record (users docs may be client-writable).
+ */
+function loadSubscriptionState(uid: string): Promise<SubscriptionState> {
+  return resolveSubscriptionState(dbGetDoc, uid, Date.now());
 }
 
 /** Applies subscription expiry: an expired paid plan is downgraded to free. */
@@ -179,17 +204,6 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
 
 // Plan-state reads are always fresh from Firestore (no cache), so every
 // serverless instance sees coherent state.
-
-/**
- * Requests whose effective count is within this band of the plan limit are
- * consumed through a Firestore transaction (fresh read inside the tx, so a
- * concurrent burst can never overshoot the hard cap). Far-from-limit
- * requests keep the cheap read+increment path — transactions serialize per
- * doc and would collapse under a large burst, which is fine when the count
- * can't reach the limit anyway (the band bounds worst-case overshoot to
- * concurrent in-flight requests within it).
- */
-const QUOTA_ATOMIC_BAND = 10;
 
 /**
  * Effective plan (expiry applied, window refreshed) without consuming
@@ -230,12 +244,12 @@ export async function getPlanState(
  * Consumes one message of quota. Throws LimitReachedError at the limit. Call
  * only after a successful AI reply so failures don't burn allowance.
  *
- * Near the plan limit (within QUOTA_ATOMIC_BAND of it) the consume runs as a
- * transaction with a fresh in-transaction read, making the cap atomic even
- * under a concurrent burst. Far from the limit a single atomic
- * increment(1) is used — transactions serialize per doc and collapse under
- * burst load, and the band bounds any overshoot to in-flight near-limit
- * requests.
+ * Always transactional: plan state and count are re-read INSIDE the
+ * transaction and the write happens only when `count < plan limit`. Firestore
+ * serializes transactions on the document, so concurrent consumes commit one
+ * after another and the plan cap is a true hard cap — a burst of any size can
+ * never push messageCount past the limit. The pre-AI gate in /chat is only a
+ * fast-fail hint, never the enforcement point.
  */
 export async function consumeMessage(
   uid: string,
@@ -244,121 +258,67 @@ export async function consumeMessage(
   if (developer) return { success: true };
 
   const now = Date.now();
-
-  // getPlanState's window-refresh would mask whether the stored window
-  // actually rolled over, so load raw state here.
-  const raw = await loadSubscriptionState(uid);
-  const state = applyExpiry(raw, now);
-  // Developer premium is virtual: never write quota counters for it.
-  if (state.isDeveloper || state.unlimited) return { success: true };
-  const downgraded = state.plan !== raw.plan || state.expiresAt !== raw.expiresAt;
-  const config = PLAN_CONFIG[state.plan];
-
-  let effectiveCount = state.messageCount;
-  let effectiveReset = state.lastResetAt;
-  const windowExpired = now - effectiveReset >= config.refreshMs;
-  if (windowExpired) {
-    effectiveCount = 0;
-    effectiveReset = now;
-  }
-
-  if (effectiveCount >= config.limit) {
-    throw new LimitReachedError(effectiveReset + config.refreshMs, state.plan);
-  }
-
   const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
 
-  if (effectiveCount >= config.limit - QUOTA_ATOMIC_BAND) {
-    // --- Atomic near-limit path -------------------------------------------
-    // Everything is re-derived from a fresh read INSIDE the transaction, so
-    // concurrent consumes serialize correctly and the limit is a hard cap.
-    await db.runTransaction(async (tx) => {
-      const snap = await tx.get(subRef);
-      const txRaw = normalizeState(snap.exists ? snap.data() || {} : {});
-      const txState = applyExpiry(txRaw, now);
-      // Premium state arrived mid-flight (grant racing this consume): never
-      // write a counter for it.
-      if (txState.isDeveloper || txState.unlimited) return;
+  await db.runTransaction(async (tx) => {
+    const rawState = await resolveSubscriptionState((reference) => tx.get(reference), uid, now);
+    const state = applyExpiry(rawState, now);
+    // Premium state arrived mid-flight (grant or developer flag racing this
+    // consume): never write a counter for it.
+    if (state.isDeveloper || state.unlimited) return;
 
-      const txConfig = PLAN_CONFIG[txState.plan];
-      const txDowngraded = txState.plan !== txRaw.plan || txState.expiresAt !== txRaw.expiresAt;
+    // getPlanState's window-refresh would mask whether the stored window
+    // actually rolled over, so decision state is derived from the raw doc.
+    const config = PLAN_CONFIG[state.plan];
+    const downgraded = state.plan !== rawState.plan || state.expiresAt !== rawState.expiresAt;
 
-      let count = txState.messageCount;
-      let resetAt = txState.lastResetAt;
-      const txWindowExpired = now - resetAt >= txConfig.refreshMs;
-      if (txWindowExpired) {
-        count = 0;
-        resetAt = now;
-      }
-
-      if (count >= txConfig.limit) {
-        throw new LimitReachedError(resetAt + txConfig.refreshMs, txState.plan);
-      }
-
-      if (txWindowExpired || txDowngraded) {
-        // Persist the reset with an explicit count of 1 (see fast path below).
-        tx.set(
-          subRef,
-          {
-            plan: txState.plan,
-            expiresAt: txState.expiresAt,
-            messageCount: 1,
-            lastResetAt: resetAt,
-            updatedAt: now,
-            isTrial: txState.isTrial,
-            trialEndsAt: txState.trialEndsAt,
-          },
-          { merge: true }
-        );
-      } else {
-        const fields: Record<string, unknown> = {
-          plan: txState.plan,
-          messageCount: count + 1,
-          updatedAt: now,
-        };
-        if (txState.plan === DEFAULT_PLAN) {
-          fields.expiresAt = null;
-          fields.isTrial = false;
-          fields.trialEndsAt = null;
-        }
-        tx.set(subRef, fields, { merge: true });
-      }
-    });
-    return { success: true };
-  }
-
-  // --- Fast path: far from the limit, plain atomic increment ---------------
-  const needsResetWrite = windowExpired || downgraded;
-
-  if (needsResetWrite) {
-    // Persist the reset with an explicit count of 1: increment(1) would keep
-    // growing from the stale stored value instead of resetting.
-    const fields: Record<string, unknown> = {
-      plan: state.plan,
-      expiresAt: state.expiresAt,
-      messageCount: 1,
-      lastResetAt: effectiveReset,
-      updatedAt: now,
-      // `state` is post-applyExpiry: an expired trial is already cleared
-      // here (isTrial false / trialEndsAt null) while trialUsed persists.
-      isTrial: state.isTrial,
-      trialEndsAt: state.trialEndsAt,
-    };
-    await subRef.set(fields, { merge: true });
-  } else {
-    const fields: Record<string, unknown> = {
-      plan: state.plan,
-      messageCount: FieldValue.increment(1),
-      updatedAt: now,
-    };
-    if (state.plan === DEFAULT_PLAN) {
-      fields.expiresAt = null;
-      fields.isTrial = false;
-      fields.trialEndsAt = null;
+    let count = state.messageCount;
+    let resetAt = state.lastResetAt;
+    const windowExpired = now - resetAt >= config.refreshMs;
+    if (windowExpired) {
+      count = 0;
+      resetAt = now;
     }
 
-    await subRef.set(fields, { merge: true });
-  }
+    // Hard cap on the fresh in-transaction read: this comparison can never
+    // be bypassed by another request reading a stale count, because the
+    // write only commits with this read's snapshot.
+    if (count >= config.limit) {
+      throw new LimitReachedError(resetAt + config.refreshMs, state.plan);
+    }
+
+    if (windowExpired || downgraded) {
+      // Persist the reset with an explicit count of 1: increment(1) would
+      // keep growing from the stale stored value instead of resetting.
+      tx.set(
+        subRef,
+        {
+          plan: state.plan,
+          expiresAt: state.expiresAt,
+          messageCount: 1,
+          lastResetAt: resetAt,
+          updatedAt: now,
+          // `state` is post-applyExpiry: an expired trial is already cleared
+          // here (isTrial false / trialEndsAt null) while trialUsed persists.
+          isTrial: state.isTrial,
+          trialEndsAt: state.trialEndsAt,
+        },
+        { merge: true }
+      );
+    } else {
+      const fields: Record<string, unknown> = {
+        plan: state.plan,
+        messageCount: count + 1,
+        updatedAt: now,
+      };
+      if (state.plan === DEFAULT_PLAN) {
+        fields.expiresAt = null;
+        fields.isTrial = false;
+        fields.trialEndsAt = null;
+      }
+      tx.set(subRef, fields, { merge: true });
+    }
+  });
 
   return { success: true };
 }

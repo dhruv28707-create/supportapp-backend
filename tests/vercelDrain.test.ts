@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import {
   mockDb,
   resetAll,
@@ -101,5 +102,68 @@ describe('vercel log drain receiver', () => {
       (doc) => doc.data.event === 'vercel_log'
     );
     expect(drained).toHaveLength(200);
+  });
+
+  it('accepts gzip-encoded deliveries (signature verified on the compressed bytes)', async () => {
+    vi.stubEnv('VERCEL_LOG_DRAIN_SECRET', DRAIN_SECRET);
+    const text = ndjson([{ message: 'gzipped hello' }, { message: 'second line' }]);
+    const compressed = zlib.gzipSync(Buffer.from(text));
+
+    const res = await request(app)
+      .post('/api/logs/vercel')
+      .set('Content-Type', 'application/x-ndjson')
+      .set('Content-Encoding', 'gzip')
+      .set('x-vercel-signature', crypto.createHmac('sha1', DRAIN_SECRET).update(compressed).digest('hex'))
+      .send(compressed);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, received: 2, stored: 2 });
+    const drained = mockDb.docsIn('appLogs').filter((doc) => doc.data.event === 'vercel_log');
+    expect(drained).toHaveLength(2);
+  });
+
+  it('rejects a decompression bomb instead of OOMing (hard output cap)', async () => {
+    vi.stubEnv('VERCEL_LOG_DRAIN_SECRET', DRAIN_SECRET);
+    // Tiny compressed payload that expands far beyond every cap.
+    const bomb = zlib.gzipSync(Buffer.alloc(64 * 1024 * 1024, 0));
+    expect(bomb.length).toBeLessThan(2 * 1024 * 1024);
+
+    const res = await request(app)
+      .post('/api/logs/vercel')
+      .set('Content-Type', 'application/x-ndjson')
+      .set('Content-Encoding', 'gzip')
+      .set('x-vercel-signature', crypto.createHmac('sha1', DRAIN_SECRET).update(bomb).digest('hex'))
+      .send(bomb);
+
+    expect(res.status).toBe(413);
+    expect(
+      mockDb.docsIn('appLogs').filter((doc) => doc.data.event === 'vercel_log')
+    ).toHaveLength(0);
+  });
+
+  it('rejects corrupt gzip payloads with 400', async () => {
+    vi.stubEnv('VERCEL_LOG_DRAIN_SECRET', DRAIN_SECRET);
+    const garbage = Buffer.from('definitely-not-gzip-data');
+    const res = await request(app)
+      .post('/api/logs/vercel')
+      .set('Content-Type', 'application/x-ndjson')
+      .set('Content-Encoding', 'gzip')
+      .set('x-vercel-signature', crypto.createHmac('sha1', DRAIN_SECRET).update(garbage).digest('hex'))
+      .send(garbage);
+
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects unsupported content-encoding values with 415', async () => {
+    vi.stubEnv('VERCEL_LOG_DRAIN_SECRET', DRAIN_SECRET);
+    const body = ndjson([{ message: 'hello' }]);
+    const res = await request(app)
+      .post('/api/logs/vercel')
+      .set('Content-Type', 'application/x-ndjson')
+      .set('Content-Encoding', 'bogus-encoding')
+      .set('x-vercel-signature', vercelSignature(body))
+      .send(Buffer.from(body));
+
+    expect(res.status).toBe(415);
   });
 });

@@ -15,6 +15,7 @@ import { trialStartHandler } from './routes/trialStart';
 import { plansHandler } from './routes/plans';
 import { developerRouter } from './routes/developer';
 import { vercelLogDrainHandler } from './routes/vercelLogDrain';
+import { MAX_RAW_BODY_BYTES as MAX_DRAIN_RAW_BODY_BYTES } from './routes/vercelLogDrain';
 import { isOriginAllowed } from './config/cors';
 import { db } from './config/firebaseAdmin';
 
@@ -22,6 +23,40 @@ import { db } from './config/firebaseAdmin';
  * Express app factory (tests drive these same routes via supertest;
  * index.ts only adds listen + shutdown).
  */
+/**
+ * Raw-body passthrough for the Vercel drain: `express.raw` either inflates
+ * gzip bodies itself (breaking the HMAC-over-wire-bytes contract) or refuses
+ * them (415), so this route reads the exact bytes off the socket instead —
+ * capped, unbuffered beyond the limit, and content-encoding-agnostic. The
+ * drain handler then verifies the HMAC over these true raw bytes and opens
+ * gzip through its own size-capped streaming decompressor.
+ */
+function rawDrainBody(limitBytes: number) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+
+    req.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      total += chunk.length;
+      if (total > limitBytes) {
+        settled = true;
+        req.resume();
+        res.status(413).json({ error: 'Payload too large' });
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      req.body = Buffer.concat(chunks);
+      next();
+    });
+  };
+}
+
 export function createApp(): express.Express {
   const app = express();
 
@@ -58,12 +93,11 @@ export function createApp(): express.Express {
     razorpayWebhookHandler
   );
 
-  // Vercel Log Drains receiver (raw body needed for HMAC verification).
-  app.post(
-    '/api/logs/vercel',
-    express.raw({ type: '*/*', limit: '2mb' }),
-    vercelLogDrainHandler
-  );
+  // Vercel Log Drains receiver: raw wire bytes (HMAC must be computed over
+  // what Vercel signed); gzip bodies are opened only by the route handler's
+  // size-capped streaming gunzip, so a compression bomb never expands
+  // unbounded anywhere in the chain.
+  app.post('/api/logs/vercel', rawDrainBody(MAX_DRAIN_RAW_BODY_BYTES), vercelLogDrainHandler);
 
   app.use(express.json());
 

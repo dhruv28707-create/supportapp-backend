@@ -246,3 +246,64 @@ describe('durable trial guard (anti-churn)', () => {
     expect((await request(app).post('/api/trial/start').set(authHeader())).status).toBe(200);
   });
 });
+
+describe('trial eligibility hint caching (no Identity Toolkit call per request)', () => {
+  it('caches the immutable creationTime after the first lookup and reuses it', async () => {
+    primeAuth('u1');
+
+    const first = await request(app).get('/api/user/plan').set(authHeader());
+    expect(first.status).toBe(200);
+    expect(first.body.trialAvailable).toBe(true);
+    // Exactly one Auth read, then the value is cached server-side in the
+    // client-untouchable subscriptions doc.
+    expect(mockAuth.getUser).toHaveBeenCalledTimes(1);
+    expect(mockDb.get('subscriptions/u1')!.authCreatedAt).toEqual(expect.any(Number));
+
+    for (let i = 0; i < 5; i++) {
+      const res = await request(app).get('/api/user/plan').set(authHeader());
+      expect(res.body.trialAvailable).toBe(true);
+    }
+    // Hammering the plan endpoint never calls auth.getUser again.
+    expect(mockAuth.getUser).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps reporting ineligible for old accounts (cached negatives stay safe)', async () => {
+    primeAuth('u1');
+    mockAuth.getUser.mockResolvedValue({
+      uid: 'u1',
+      metadata: { creationTime: new Date(Date.now() - 30 * 86400000).toISOString() },
+    });
+
+    const first = await request(app).get('/api/user/plan').set(authHeader());
+    expect(first.body.trialAvailable).toBe(false);
+    expect(mockAuth.getUser).toHaveBeenCalledTimes(1);
+
+    const second = await request(app).get('/api/user/plan').set(authHeader());
+    expect(second.body.trialAvailable).toBe(false);
+    expect(mockAuth.getUser).toHaveBeenCalledTimes(1);
+  });
+
+  it('is never eligible when the account cannot be resolved', async () => {
+    primeAuth('u1');
+    mockAuth.getUser.mockRejectedValue(new Error('identity toolkit exhausted'));
+
+    const res = await request(app).get('/api/user/plan').set(authHeader());
+    expect(res.status).toBe(200);
+    expect(res.body.trialAvailable).toBe(false);
+  });
+
+  it('dedupes a concurrent burst of lookups for the same uid to one Auth call', async () => {
+    primeAuth('u1');
+    // Slow the Auth mock so all requests overlap while in-flight.
+    mockAuth.getUser.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { uid: 'u1', metadata: { creationTime: new Date().toISOString() } };
+    });
+
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, () => request(app).get('/api/user/plan').set(authHeader()))
+    );
+    expect(responses.every((r) => r.status === 200)).toBe(true);
+    expect(mockAuth.getUser).toHaveBeenCalledTimes(1);
+  });
+});
