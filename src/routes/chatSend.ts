@@ -20,6 +20,7 @@ import {
   UserMessageState,
 } from '../services/messageService';
 import { consumeRateLimit, RateLimitExceededError } from '../services/rateLimitService';
+import { db } from '../config/firebaseAdmin';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { extractClientIp } from '../utils/request';
 import { logAppEvent, writeAppLog } from '../services/logService';
@@ -104,7 +105,15 @@ const MAX_LEGACY_MESSAGES = 50;
 // Keep enough recent turns for a natural conversation without letting one
 // request create an unbounded model context or bill.
 const MAX_CONTEXT_MESSAGES = 16;
-const MAX_CONTEXT_CHARACTERS = 12_000;
+// History is attacker-authored "conversation" wrapped around a fixed system
+// prompt — a full 2000-char budget per history turn (12k chars total) gives
+// an injection the width to pre-agree facts, flip the persona, or fake
+// policy context in front of the model. History turns therefore get their
+// own tight budget: recent user turns are short by design (this is a
+// support chat, replies are ~300 tokens), and the live message keeps its
+// full MAX_MESSAGE_LENGTH allowance.
+const MAX_HISTORY_MESSAGE_CHARS = 500;
+const MAX_HISTORY_CHARACTERS = 4000;
 
 interface ChatHistoryMessage {
   role: 'user' | 'assistant';
@@ -161,7 +170,7 @@ function buildConversationHistory(rawHistory: unknown, latestUserMessage: string
     const { role, content } = item as { role?: unknown; content?: unknown };
     if ((role !== 'user' && role !== 'assistant') || typeof content !== 'string') continue;
     const trimmedContent = content.trim();
-    if (trimmedContent.length === 0 || trimmedContent.length > MAX_MESSAGE_LENGTH) continue;
+    if (trimmedContent.length === 0 || trimmedContent.length > MAX_HISTORY_MESSAGE_CHARS) continue;
     valid.push({ role, content: trimmedContent });
   }
 
@@ -179,23 +188,31 @@ function buildConversationHistory(rawHistory: unknown, latestUserMessage: string
   for (let index = beforeCurrent.length - 1; index >= 0; index--) {
     const entry = beforeCurrent[index];
     if (selected.length >= MAX_CONTEXT_MESSAGES - 1) break;
-    if (characters + entry.content.length > MAX_CONTEXT_CHARACTERS) break;
+    if (characters + entry.content.length > MAX_HISTORY_CHARACTERS) break;
     characters += entry.content.length;
     selected.unshift(entry);
   }
   return [...selected, { role: 'user', content: latestUserMessage }];
 }
 
-// Provider circuit breakers (per-instance, in-memory). After N consecutive
-// failures a model is skipped for a cooldown, then probed again. Inexact
-// across serverless instances, but keeps one dead provider from taxing every
-// request with a full timeout.
+// Provider circuit breakers. In-memory state gives instant local feedback;
+// the OPEN timestamp is ALSO persisted to a Firestore doc on open and
+// re-read (TTL-cached) by other instances, so a serverless fleet converges
+// on the cooldown instead of N cold instances each burning a full AI
+// timeout against a dead provider. Firestore and local memory can never
+// disagree harmfully: values are monotonic openedAt timestamps and the
+// cooldown check just expires them.
 const BREAKER_THRESHOLD = 5;
 const BREAKER_COOLDOWN_MS = 60_000;
+// How often an instance re-reads the shared breaker doc. Together with the
+// one-write-per-open cost, this bounds Firestore load at exactly zero while
+// no breaker is open anywhere.
+const BREAKER_SYNC_TTL_MS = 10_000;
 
 interface BreakerState {
   consecutiveFailures: number;
   openedAt: number | null;
+  lastSyncAt: number;
 }
 
 const breakers = new Map<string, BreakerState>();
@@ -203,14 +220,58 @@ const breakers = new Map<string, BreakerState>();
 function getModelBreaker(name: string): BreakerState {
   let state = breakers.get(name);
   if (!state) {
-    state = { consecutiveFailures: 0, openedAt: null };
+    state = { consecutiveFailures: 0, openedAt: null, lastSyncAt: 0 };
     breakers.set(name, state);
   }
   return state;
 }
 
+/** Shared breaker doc: one per provider model name. */
+function breakerDocRef(name: string) {
+  return db.collection('rateLimits').doc(`breaker:${name}`);
+}
+
+/**
+ * Best-effort adoption of a cooldown another instance opened. Gets the doc
+ * at most once per BREAKER_SYNC_TTL_MS per model and only moves the local
+ * cooldown EARLIER (monotonic openedAt), so a stale or lost doc can never
+ * re-close an open breaker locally.
+ */
+function maybeSyncBreakerFromShared(name: string): void {
+  const state = getModelBreaker(name);
+  const now = Date.now();
+  if (state.lastSyncAt !== 0 && now - state.lastSyncAt < BREAKER_SYNC_TTL_MS) return;
+  state.lastSyncAt = now;
+  void breakerDocRef(name)
+    .get()
+    .then((snap) => {
+      const shared = (snap.data() || {}) as { openedAt?: unknown };
+      const sharedOpenedAt =
+        typeof shared.openedAt === 'number' && Number.isFinite(shared.openedAt)
+          ? shared.openedAt
+          : 0;
+      if (sharedOpenedAt > (state.openedAt ?? 0)) {
+        state.openedAt = sharedOpenedAt;
+      }
+    })
+    .catch((error: unknown) => {
+      // Sync is best-effort: the per-instance breaker still functions.
+      console.error(`[chat] Breaker state sync failed for ${name}:`, error);
+    });
+}
+
+/** Best-effort persistence of a locally-opened breaker for other instances. */
+function persistBreakerOpen(name: string, openedAt: number): void {
+  void breakerDocRef(name)
+    .set({ openedAt, updatedAt: openedAt }, { merge: true })
+    .catch((error: unknown) => {
+      console.error(`[chat] Breaker state persist failed for ${name}:`, error);
+    });
+}
+
 /** True when the breaker is open (skip this model until cooldown passes). */
 function isModelSkipped(name: string): boolean {
+  maybeSyncBreakerFromShared(name);
   const state = getModelBreaker(name);
   if (state.openedAt === null) return false;
   if (Date.now() - state.openedAt >= BREAKER_COOLDOWN_MS) {
@@ -229,10 +290,13 @@ function recordModelResult(name: string, ok: boolean): void {
   }
   state.consecutiveFailures += 1;
   if (state.consecutiveFailures >= BREAKER_THRESHOLD) {
-    if (state.openedAt === null) {
-      console.warn(`[chat] Circuit breaker OPEN for ${name} (${BREAKER_THRESHOLD} consecutive failures)`);
-    }
+    const wasOpen = state.openedAt !== null;
     state.openedAt = Date.now();
+    if (!wasOpen) {
+      console.warn(`[chat] Circuit breaker OPEN for ${name} (${BREAKER_THRESHOLD} consecutive failures)`);
+      // Publish the cooldown so other instances skip the dead provider too.
+      persistBreakerOpen(name, state.openedAt);
+    }
   }
 }
 

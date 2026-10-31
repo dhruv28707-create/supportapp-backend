@@ -29,6 +29,16 @@ export const TRIAL_IP_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 export const ORDER_IP_RATE_LIMIT_MAX = 20;
 export const ORDER_IP_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
+// Fail loud at boot: without the dedicated secret, every IP would collapse
+// into one shared dev-default bucket (neutering the account-farming backstop)
+// — a deploy-time failure is the correct signal. Non-production keeps a
+// dev-only default so tests and local runs work without configuration.
+if (!process.env.IP_HASH_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error(
+    'Missing IP_HASH_SECRET: per-IP throttles cannot key safely. Set a dedicated random secret (never reuse the Razorpay webhook secret).'
+  );
+}
+
 /** Per-request reads so env tuning applies without redeploying code. */
 export function getChatIpRateLimitMax(): number {
   const raw = Number(process.env.CHAT_IP_RATE_LIMIT_MAX);
@@ -43,16 +53,29 @@ export function getChatIpRateLimitWindowMs(): number {
 
 function hashIp(ip: string): string {
   // HMAC, not plain hash: a plain hash of an IPv4 address is reversible by
-  // enumeration. Falls back to the webhook secret when no dedicated secret
-  // is set; dev default is fail-open with a warning.
-  const secret = process.env.IP_HASH_SECRET || process.env.RAZORPAY_WEBHOOK_SECRET;
-  if (!secret) {
-    console.warn(
-      '[fail-open] IP throttle has no IP_HASH_SECRET/RAZORPAY_WEBHOOK_SECRET — using dev-only default'
-    );
-    return createHmac('sha256', 'dev-only-ip-hash-secret').update(ip).digest('hex');
+  // enumeration.
+  //
+  // The secret is ALWAYS the dedicated IP_HASH_SECRET — never the Razorpay
+  // webhook secret. Sharing secrets across systems means rotating one
+  // silently reshapes (or empties) the other users' throttle keys, giving
+  // every IP a fresh window mid-attack.
+  //
+  // Production requires the secret: without it every IP would collapse into
+  // one shared dev-default bucket, so we fail loud at boot instead of
+  // silently running with a shared key. Tests/dev keep a dev-only default.
+  const secret = process.env.IP_HASH_SECRET;
+  if (secret) {
+    return createHmac('sha256', secret).update(ip).digest('hex');
   }
-  return createHmac('sha256', secret).update(ip).digest('hex');
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'Missing IP_HASH_SECRET: per-IP throttles cannot key safely. Set a dedicated random secret (never reuse the Razorpay webhook secret).'
+    );
+  }
+  console.error(
+    '[fail-open] IP throttle has no IP_HASH_SECRET — using dev-only default (never happens in production: startup fails instead)'
+  );
+  return createHmac('sha256', 'dev-only-ip-hash-secret').update(ip).digest('hex');
 }
 
 /**

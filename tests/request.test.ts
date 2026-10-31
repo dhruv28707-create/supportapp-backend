@@ -17,12 +17,25 @@ describe('extractClientIp', () => {
     expect(ip).toBe('1.2.3.4');
   });
 
-  it('trusts x-vercel-forwarded-for on Vercel', () => {
+  it('prefers the peer address over the header on Vercel (throttle key cannot be forged)', () => {
     vi.stubEnv('VERCEL', '1');
     const ip = extractClientIp(
-      makeReq({ 'x-vercel-forwarded-for': '9.9.9.9, 10.0.0.1' })
+      makeReq({ 'x-vercel-forwarded-for': '9.9.9.9, 10.0.0.1' }, '5.6.7.8')
     );
-    expect(ip).toBe('9.9.9.9');
+    // Even if the platform ever appended a client-supplied value instead of
+    // overwriting, the attacker-picked first value must not key the throttle.
+    expect(ip).toBe('5.6.7.8');
+  });
+
+  it('falls back to x-vercel-forwarded-for only when the peer is unknown', () => {
+    vi.stubEnv('VERCEL', '1');
+    expect(extractClientIp(makeReq({ 'x-vercel-forwarded-for': '9.9.9.9, 10.0.0.1' }, ''))).toBe(
+      '9.9.9.9'
+    );
+  });
+
+  it('normalizes IPv4-mapped IPv6 peer addresses to plain IPv4', () => {
+    expect(extractClientIp(makeReq({}, '::ffff:203.0.113.7'))).toBe('203.0.113.7');
   });
 
   it('honors x-forwarded-for only with TRUST_FORWARDED_HEADERS', () => {
