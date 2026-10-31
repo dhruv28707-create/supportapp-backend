@@ -88,8 +88,11 @@ export async function trialStartHandler(
   }
 
   // --- Grant (transactional one-trial guard) -------------------------------
+  // The verified token email is included so the durable trialGuards ledger
+  // can also key on identity beyond the uid (email survives account deletion
+  // + same-email re-signup; the uid key covers passwordless/anonymous).
   try {
-    const grant = await startUltimateTrial(uid);
+    const grant = await startUltimateTrial(uid, req.user!.email || null);
 
     console.log(`[trial-start] Ultimate trial granted uid=${uid.slice(0, 8)} for ${ULTIMATE_TRIAL_DAYS} days`);
 

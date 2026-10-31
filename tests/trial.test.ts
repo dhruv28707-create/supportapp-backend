@@ -189,3 +189,60 @@ describe('trial interaction with cancel and deletion', () => {
     expect(mockDb.get('subscriptions/u1')).toBeUndefined();
   });
 });
+
+describe('durable trial guard (anti-churn)', () => {
+  it('writes uid-keyed and email-keyed guards on grant', async () => {
+    primeAuth('u1', 'churn@test.dev');
+    const res = await request(app).post('/api/trial/start').set(authHeader());
+    expect(res.status).toBe(200);
+
+    expect(mockDb.get(`trialGuards/uid_u1`)).toMatchObject({ trialUsed: true });
+    const guardPaths = mockDb.paths().filter((p) => p.startsWith('trialGuards/email_'));
+    expect(guardPaths.length).toBe(1);
+    expect(mockDb.get(guardPaths[0])).toMatchObject({ trialUsed: true, uid: 'u1' });
+  });
+
+  it('blocks a trial after account deletion + same-email re-signup', async () => {
+    primeAuth('u1', 'churn@test.dev');
+    await request(app).post('/api/trial/start').set(authHeader());
+    await request(app).post('/api/payment-cancel').set(authHeader());
+    await request(app).delete('/api/account').set(authHeader());
+
+    // Simulate the churn cycle: subscriptions doc wiped, Auth record deleted,
+    // same email signs up again as a brand-new uid with a fresh creationTime.
+    primeAuth('u2', 'churn@test.dev');
+    const res = await request(app).post('/api/trial/start').set(authHeader());
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('trial_already_used');
+    // Hint state is repaired so trialAvailable can never lie either.
+    expect(mockDb.get('subscriptions/u2')).toMatchObject({ trialUsed: true });
+  });
+
+  it('guards survive deletion and backfill legacy accounts', async () => {
+    // Legacy account: trialUsed predates the durable guard ledger.
+    primeAuth('u1', 'legacy@test.dev');
+    mockDb.collection('subscriptions').doc('u1').set(
+      { plan: 'free', trialUsed: true, trialEndsAt: Date.now() - 24 * 3600e3 },
+      { merge: true }
+    );
+    let res = await request(app).post('/api/trial/start').set(authHeader());
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('trial_already_used');
+    expect(mockDb.get('trialGuards/uid_u1')).toMatchObject({ trialUsed: true });
+
+    // Partial state: email-keyed guard exists but uid guard is gone —
+    // any leftover gap is sealed and the trial is still refused.
+    primeAuth('u2', 'legacy@test.dev');
+    res = await request(app).post('/api/trial/start').set(authHeader());
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('trial_already_used');
+  });
+
+  it('does not leak the trial-guard window across different emails', async () => {
+    primeAuth('u1', 'a@test.dev');
+    expect((await request(app).post('/api/trial/start').set(authHeader())).status).toBe(200);
+
+    primeAuth('u2', 'b@test.dev');
+    expect((await request(app).post('/api/trial/start').set(authHeader())).status).toBe(200);
+  });
+});

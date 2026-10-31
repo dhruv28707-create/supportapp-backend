@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { resetAll, mockDb, primeAuth, authHeader } from './setup';
+import { resetAll, mockDb, mockFetch, jsonResponse, primeAuth, authHeader } from './setup';
 
 const { consumeRateLimit, RateLimitExceededError } = await import('../src/services/rateLimitService');
 const { consumeMessage, getPlanState } = await import(
@@ -80,6 +80,60 @@ describe('messageService quota (Fix #1: atomic increment)', () => {
     const after = mockDb.get('subscriptions/u1')!;
     expect(after.messageCount).toBe(1); // reset to 0, then incremented
     expect(after.lastResetAt).toBeGreaterThan(old);
+  });
+
+  it('consumes atomically (transaction) near the plan cap (hard cap under burst)', async () => {
+    const { createApp } = await import('../src/app');
+    const request = (await import('supertest')).default;
+
+    primeAuth('u1');
+    // Free-plan cap 20 → messageCount 19 is within the atomic band.
+    mockDb.collection('subscriptions').doc('u1').set(
+      { plan: 'free', messageCount: 19, lastResetAt: Date.now(), expiresAt: null },
+      { merge: false }
+    );
+
+    const txSpy = vi.spyOn(mockDb, 'runTransaction');
+    try {
+      const app = createApp();
+      mockFetch.mockResolvedValue(
+        jsonResponse({ choices: [{ message: { content: 'hey' } }] })
+      );
+      const res = await request(app)
+        .post('/api/chat')
+        .set(authHeader())
+        .send({ message: 'hello' });
+      expect(res.status).toBe(200);
+      // The consume ran through the transactional path and hit exactly 20.
+      expect(txSpy).toHaveBeenCalled();
+      expect(mockDb.get('subscriptions/u1')!.messageCount).toBe(20);
+
+      // Next chat is refused by the pre-AI gate — no overshoot is possible.
+      const second = await request(app)
+        .post('/api/chat')
+        .set(authHeader())
+        .send({ message: 'again' });
+      expect(second.status).toBe(429);
+      expect(second.body.code).toBe('quota_exhausted');
+      expect(mockDb.get('subscriptions/u1')!.messageCount).toBe(20);
+    } finally {
+      txSpy.mockRestore();
+    }
+  });
+
+  it('far-from-limit consumes do NOT pay the transaction cost', async () => {
+    mockDb.collection('subscriptions').doc('u1').set(
+      { plan: 'free', messageCount: 3, lastResetAt: Date.now(), expiresAt: null },
+      { merge: false }
+    );
+    const txSpy = vi.spyOn(mockDb, 'runTransaction');
+    try {
+      await consumeMessage('u1');
+      expect(txSpy).not.toHaveBeenCalled();
+      expect(mockDb.get('subscriptions/u1')!.messageCount).toBe(4);
+    } finally {
+      txSpy.mockRestore();
+    }
   });
 });
 

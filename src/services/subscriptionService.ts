@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { db } from '../config/firebaseAdmin';
 import { DocumentData } from 'firebase-admin/firestore';
 import {
@@ -26,6 +27,40 @@ interface PaidPaymentFields {
  */
 export const SUBSCRIPTIONS_COLLECTION = 'subscriptions';
 export const PAYMENTS_COLLECTION = 'payments';
+
+/**
+ * Server-only anti-churn ledger for the once-ever free trial.
+ *
+ * `subscriptions/{uid}.trialUsed` alone is not durable: DELETE /api/account
+ * deliberately wipes the subscription doc, and account deletion also deletes
+ * the Firebase Auth record — which makes the same email sign-up-able again
+ * with a fresh uid and a fresh creationTime. Without this ledger, an abuser
+ * could churn trial -> cancel -> delete -> re-signup forever to farm the
+ * 5-day Ultimate trial (and unbounded free quota resets).
+ *
+ * Docs here are keyed by uid AND by hashed email, so the guard survives:
+ *   - uid reset (account deletion + same-email re-signup), via the email key
+ *   - new email on an old device is blocked only for password accounts where
+ *     the uid key still applies — email-keyed guard covers the realistic case
+ *     (Google signup reuses the same email).
+ *
+ * These docs deliberately NOT deleted by the account-deletion flow (this is
+ * billing-integrity metadata, not user content — it contains no message
+ * data). Firestore rules keep it server-only.
+ */
+export const TRIAL_GUARDS_COLLECTION = 'trialGuards';
+
+/** Doc id for a uid-keyed trial guard. */
+export function trialGuardKey(uid: string): string {
+  return `uid_${uid}`;
+}
+
+/** Doc id for an email-keyed trial guard (hash of the lowercased email). */
+export function trialEmailGuardKey(email: string): string {
+  return `email_${createHash('sha256')
+    .update(email.trim().toLowerCase())
+    .digest('hex')}`;
+}
 
 /** Subscription status on subscriptions/{uid}. Missing/unknown reads as active. */
 export type SubscriptionStatus = 'active' | 'cancelled';
@@ -197,24 +232,65 @@ export interface TrialGrant {
 
 /**
  * Grants the 5-day Ultimate trial, transactionally. The transaction makes
- * the one-trial-per-account guard atomic under concurrent calls.
+ * the one-trial-per-account guard atomic under concurrent calls and also
+ * backs the guard by durable `trialGuards` docs (uid-keyed + email-keyed)
+ * that survive account deletion, so deleting and re-signing up can never
+ * reset the once-ever flag.
  * Account-age eligibility is checked by the route (needs the Auth record).
  */
-export async function startUltimateTrial(uid: string): Promise<TrialGrant> {
+export async function startUltimateTrial(
+  uid: string,
+  email?: string | null
+): Promise<TrialGrant> {
   const now = Date.now();
   const expiresAt = now + ULTIMATE_TRIAL_MS;
   const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
+  const guardUidRef = db.collection(TRIAL_GUARDS_COLLECTION).doc(trialGuardKey(uid));
+  const guardEmailId = email ? trialEmailGuardKey(email) : null;
+  const guardEmailRef = guardEmailId
+    ? db.collection(TRIAL_GUARDS_COLLECTION).doc(guardEmailId)
+    : null;
 
   const granted = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(subRef);
-    const data = snap.exists ? snap.data() || {} : {};
+    const subSnap = await tx.get(subRef);
+    const uidGuardSnap = await tx.get(guardUidRef);
+    const emailGuardSnap = guardEmailRef ? await tx.get(guardEmailRef) : null;
+
+    const data = subSnap.exists ? subSnap.data() || {} : {};
+    const subTrialUsed = data.trialUsed === true;
+    const uidGuardUsed = uidGuardSnap.exists && uidGuardSnap.data()?.trialUsed === true;
+    const emailGuardUsed =
+      guardEmailRef !== null && emailGuardSnap!.exists && emailGuardSnap!.data()?.trialUsed === true;
+
+    const trialAlreadyUsed = subTrialUsed || uidGuardUsed || emailGuardUsed;
 
     if (data.isDeveloper === true || data.developer === true) {
       // Developer accounts already have Ultimate; don't consume their trial.
       throw new TrialNotAllowedError('already_subscribed');
     }
 
-    if (data.trialUsed === true) {
+    if (trialAlreadyUsed) {
+      // Backfill missing guards + the legacy sub-doc flag inside the same
+      // transaction, so accounts that trialed before this ledger existed
+      // (or any partially-written state) are durably sealed from now on.
+      if (!uidGuardSnap.exists) {
+        tx.set(guardUidRef, { trialUsed: true, uid, grantedAt: now }, { merge: false });
+      }
+      if (guardEmailRef && !emailGuardSnap!.exists) {
+        tx.set(
+          guardEmailRef,
+          { trialUsed: true, uid, emailKey: guardEmailId, grantedAt: now },
+          { merge: false }
+        );
+      }
+      if (subSnap.exists && !subTrialUsed) {
+        tx.set(subRef, { trialUsed: true, updatedAt: now }, { merge: true });
+      } else if (!subSnap.exists) {
+        // Fresh signup racing the guard (e.g. post-deletion re-signup):
+        // seed the doc so plan reads report trialUsed instead of showing
+        // a "trial available" CTA that would 409 when tapped.
+        tx.set(subRef, { trialUsed: true, updatedAt: now }, { merge: true });
+      }
       throw new TrialNotAllowedError('trial_already_used');
     }
 
@@ -244,6 +320,16 @@ export async function startUltimateTrial(uid: string): Promise<TrialGrant> {
       },
       { merge: true }
     );
+
+    // Durable, deletion-proof records of the one trial (uid + hashed email).
+    tx.set(guardUidRef, { trialUsed: true, uid, grantedAt: now }, { merge: false });
+    if (guardEmailRef) {
+      tx.set(
+        guardEmailRef,
+        { trialUsed: true, uid, emailKey: guardEmailId, grantedAt: now },
+        { merge: false }
+      );
+    }
 
     return { plan: TRIAL_PLAN, startedAt: now, expiresAt };
   });

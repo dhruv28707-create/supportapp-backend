@@ -86,6 +86,10 @@ export async function deleteAccountData(uid: string): Promise<DeletionSummary> {
   const startedAt = Date.now();
 
   // 1) Subscription doc. Check existence so the summary stays accurate.
+  // NOTE: the durable trialGuards ledger is deliberately NOT deleted here —
+  // it is what makes the once-ever free trial survive account deletion +
+  // same-email re-signup (anti-churn). It holds no user content, only
+  // billing-integrity flags.
   const deleteSubscription = (async () => {
     try {
       const snap = await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).get();

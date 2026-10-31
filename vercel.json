@@ -1,15 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "version": 2,
-  "framework": null,
-  "buildCommand": "npm run typecheck",
-  "outputDirectory": "public",
-  "functions": {
-    "api/[[...route]].ts": {
-      "maxDuration": 60
-    }
-  },
-  "rewrites": [],
   "env": {
     "NODE_OPTIONS": "--no-deprecation"
   }

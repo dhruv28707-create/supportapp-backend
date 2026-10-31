@@ -106,6 +106,17 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------------
+    // trialGuards/{key} — durable "trial already used" ledger (uid-keyed +
+    // hashed-email-keyed docs). Deliberately NOT deleted by DELETE
+    // /api/account so deleting and re-signing up can never restart the
+    // once-ever free trial. Billing-integrity metadata only: no user
+    // content, no message data. Server-only.
+    // ---------------------------------------------------------------
+    match /trialGuards/{docId} {
+      allow read, write: if false;
+    }
+
+    // ---------------------------------------------------------------
     // Anything else — explicit deny.
     // ---------------------------------------------------------------
     // New collections must be added above with deliberate per-collection

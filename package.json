@@ -10,8 +10,8 @@
     "build": "tsc",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
-    "lint": "eslint src/ api/ tests/ scripts/ --ext .ts",
-    "lint:fix": "eslint src/ api/ tests/ scripts/ --ext .ts --fix",
+    "lint": "eslint src/ tests/ scripts/ --ext .ts",
+    "lint:fix": "eslint src/ tests/ scripts/ --ext .ts --fix",
     "developer:grant": "ts-node scripts/grant-developer.ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
@@ -44,8 +44,5 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3",
     "vitest": "^1.6.1"
-  },
-  "allowScripts": {
-    "esbuild@0.21.5": true
   }
 }

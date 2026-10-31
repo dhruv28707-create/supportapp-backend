@@ -181,6 +181,17 @@ function applyExpiry(state: SubscriptionState, now: number): SubscriptionState {
 // serverless instance sees coherent state.
 
 /**
+ * Requests whose effective count is within this band of the plan limit are
+ * consumed through a Firestore transaction (fresh read inside the tx, so a
+ * concurrent burst can never overshoot the hard cap). Far-from-limit
+ * requests keep the cheap read+increment path — transactions serialize per
+ * doc and would collapse under a large burst, which is fine when the count
+ * can't reach the limit anyway (the band bounds worst-case overshoot to
+ * concurrent in-flight requests within it).
+ */
+const QUOTA_ATOMIC_BAND = 10;
+
+/**
  * Effective plan (expiry applied, window refreshed) without consuming
  * anything. Used for read-only decisions like persona gating.
  */
@@ -219,9 +230,12 @@ export async function getPlanState(
  * Consumes one message of quota. Throws LimitReachedError at the limit. Call
  * only after a successful AI reply so failures don't burn allowance.
  *
- * Single atomic increment(1), no transaction: transactions serialize per doc
- * and collapse under burst load. A hard concurrent burst can overshoot the
- * limit slightly — acceptable for a chat quota; availability matters more.
+ * Near the plan limit (within QUOTA_ATOMIC_BAND of it) the consume runs as a
+ * transaction with a fresh in-transaction read, making the cap atomic even
+ * under a concurrent burst. Far from the limit a single atomic
+ * increment(1) is used — transactions serialize per doc and collapse under
+ * burst load, and the band bounds any overshoot to in-flight near-limit
+ * requests.
  */
 export async function consumeMessage(
   uid: string,
@@ -252,6 +266,68 @@ export async function consumeMessage(
     throw new LimitReachedError(effectiveReset + config.refreshMs, state.plan);
   }
 
+  const subRef = db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid);
+
+  if (effectiveCount >= config.limit - QUOTA_ATOMIC_BAND) {
+    // --- Atomic near-limit path -------------------------------------------
+    // Everything is re-derived from a fresh read INSIDE the transaction, so
+    // concurrent consumes serialize correctly and the limit is a hard cap.
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(subRef);
+      const txRaw = normalizeState(snap.exists ? snap.data() || {} : {});
+      const txState = applyExpiry(txRaw, now);
+      // Premium state arrived mid-flight (grant racing this consume): never
+      // write a counter for it.
+      if (txState.isDeveloper || txState.unlimited) return;
+
+      const txConfig = PLAN_CONFIG[txState.plan];
+      const txDowngraded = txState.plan !== txRaw.plan || txState.expiresAt !== txRaw.expiresAt;
+
+      let count = txState.messageCount;
+      let resetAt = txState.lastResetAt;
+      const txWindowExpired = now - resetAt >= txConfig.refreshMs;
+      if (txWindowExpired) {
+        count = 0;
+        resetAt = now;
+      }
+
+      if (count >= txConfig.limit) {
+        throw new LimitReachedError(resetAt + txConfig.refreshMs, txState.plan);
+      }
+
+      if (txWindowExpired || txDowngraded) {
+        // Persist the reset with an explicit count of 1 (see fast path below).
+        tx.set(
+          subRef,
+          {
+            plan: txState.plan,
+            expiresAt: txState.expiresAt,
+            messageCount: 1,
+            lastResetAt: resetAt,
+            updatedAt: now,
+            isTrial: txState.isTrial,
+            trialEndsAt: txState.trialEndsAt,
+          },
+          { merge: true }
+        );
+      } else {
+        const fields: Record<string, unknown> = {
+          plan: txState.plan,
+          messageCount: count + 1,
+          updatedAt: now,
+        };
+        if (txState.plan === DEFAULT_PLAN) {
+          fields.expiresAt = null;
+          fields.isTrial = false;
+          fields.trialEndsAt = null;
+        }
+        tx.set(subRef, fields, { merge: true });
+      }
+    });
+    return { success: true };
+  }
+
+  // --- Fast path: far from the limit, plain atomic increment ---------------
   const needsResetWrite = windowExpired || downgraded;
 
   if (needsResetWrite) {
@@ -268,7 +344,7 @@ export async function consumeMessage(
       isTrial: state.isTrial,
       trialEndsAt: state.trialEndsAt,
     };
-    await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
+    await subRef.set(fields, { merge: true });
   } else {
     const fields: Record<string, unknown> = {
       plan: state.plan,
@@ -281,7 +357,7 @@ export async function consumeMessage(
       fields.trialEndsAt = null;
     }
 
-    await db.collection(SUBSCRIPTIONS_COLLECTION).doc(uid).set(fields, { merge: true });
+    await subRef.set(fields, { merge: true });
   }
 
   return { success: true };
