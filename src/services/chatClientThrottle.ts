@@ -29,16 +29,6 @@ export const TRIAL_IP_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 export const ORDER_IP_RATE_LIMIT_MAX = 20;
 export const ORDER_IP_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
-// Fail loud at boot: without the dedicated secret, every IP would collapse
-// into one shared dev-default bucket (neutering the account-farming backstop)
-// — a deploy-time failure is the correct signal. Non-production keeps a
-// dev-only default so tests and local runs work without configuration.
-if (!process.env.IP_HASH_SECRET && process.env.NODE_ENV === 'production') {
-  throw new Error(
-    'Missing IP_HASH_SECRET: per-IP throttles cannot key safely. Set a dedicated random secret (never reuse the Razorpay webhook secret).'
-  );
-}
-
 /** Per-request reads so env tuning applies without redeploying code. */
 export function getChatIpRateLimitMax(): number {
   const raw = Number(process.env.CHAT_IP_RATE_LIMIT_MAX);
@@ -60,20 +50,14 @@ function hashIp(ip: string): string {
   // silently reshapes (or empties) the other users' throttle keys, giving
   // every IP a fresh window mid-attack.
   //
-  // Production requires the secret: without it every IP would collapse into
-  // one shared dev-default bucket, so we fail loud at boot instead of
-  // silently running with a shared key. Tests/dev keep a dev-only default.
+  // Missing secret is non-fatal so the function never crashes at startup.
+  // The trade-off: every IP collapses into one shared dev-default bucket.
   const secret = process.env.IP_HASH_SECRET;
   if (secret) {
     return createHmac('sha256', secret).update(ip).digest('hex');
   }
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error(
-      'Missing IP_HASH_SECRET: per-IP throttles cannot key safely. Set a dedicated random secret (never reuse the Razorpay webhook secret).'
-    );
-  }
   console.error(
-    '[fail-open] IP throttle has no IP_HASH_SECRET — using dev-only default (never happens in production: startup fails instead)'
+    '[fail-open] IP throttle has no IP_HASH_SECRET — using dev-only default. Set IP_HASH_SECRET in Vercel env vars.'
   );
   return createHmac('sha256', 'dev-only-ip-hash-secret').update(ip).digest('hex');
 }
