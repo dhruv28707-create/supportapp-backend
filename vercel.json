@@ -9,7 +9,9 @@
       "maxDuration": 60
     }
   },
-  "rewrites": [],
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/[[...route]]" }
+  ],
   "env": {
     "NODE_OPTIONS": "--no-deprecation"
   }
