@@ -624,11 +624,10 @@ async function handleChatSend(
     return;
   }
 
-  // Personality: omitted defaults to Friend; explicitly invalid is rejected.
-  // Legacy shorthands (BestFriend, BF, GF) are coerced so old app versions
-  // and stored values keep working. "Guide_<religion>" selects Guide with
-  // that overlay.
-  let personality: PersonalityType = 'Friend';
+  // Personality: omitted defaults to Best Friend; explicitly invalid is rejected.
+  // Legacy shorthand BestFriend is coerced so old app versions and stored
+  // values keep working. "Guide_<religion>" selects Guide with that overlay.
+  let personality: PersonalityType = 'Best Friend';
   let religionSubType: string | undefined =
     typeof body.religionSubType === 'string' ? body.religionSubType : undefined;
 

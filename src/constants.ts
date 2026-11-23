@@ -13,14 +13,9 @@ export const PERSONALITIES = [
   'Mother',
   'Sister',
   'Brother',
-  'Friend',
   'Best Friend',
   'Mentor',
   'Guide',
-  'Husband',
-  'Wife',
-  'Boyfriend',
-  'Girlfriend',
   'Stranger',
 ] as const;
 
@@ -36,7 +31,6 @@ export const FREE_PERSONALITIES: readonly string[] = [
   'Mother',
   'Sister',
   'Brother',
-  'Friend',
   'Best Friend',
   'Stranger',
 ];
@@ -58,13 +52,11 @@ export function isPersonalityAllowed(plan: PlanType, personality: string): boole
 
 /**
  * Legacy client aliases, coerced server-side so old app versions and stored
- * values keep working: 'BestFriend' (no space), 'BF'/'GF' shorthands.
+ * values keep working: 'BestFriend' (no space).
  * Anything else unknown is still rejected with a 400.
  */
 export const PERSONALITY_ALIASES: Record<string, string> = {
   BestFriend: 'Best Friend',
-  BF: 'Boyfriend',
-  GF: 'Girlfriend',
 };
 
 /**
@@ -226,7 +218,7 @@ export function getPlanOptions(): PlanOption[] {
       'pro_monthly',
       'Pro Monthly',
       'More room to talk, with every persona unlocked.',
-      [`${PLAN_CONFIG.pro.limit} messages every ${PLAN_CONFIG.pro.refreshMs / (60 * 60 * 1000)} hours`, 'All 13 AI personas'],
+      [`${PLAN_CONFIG.pro.limit} messages every ${PLAN_CONFIG.pro.refreshMs / (60 * 60 * 1000)} hours`, 'All 8 AI personas'],
       false
     ),
     deal(
@@ -235,7 +227,7 @@ export function getPlanOptions(): PlanOption[] {
       'pro_yearly',
       'Pro Yearly',
       'Everything in Pro, billed yearly.',
-      [`${PLAN_CONFIG.pro.limit} messages every ${PLAN_CONFIG.pro.refreshMs / (60 * 60 * 1000)} hours`, 'All 13 AI personas', 'Best value'],
+      [`${PLAN_CONFIG.pro.limit} messages every ${PLAN_CONFIG.pro.refreshMs / (60 * 60 * 1000)} hours`, 'All 8 AI personas', 'Best value'],
       false
     ),
     deal(
@@ -243,8 +235,8 @@ export function getPlanOptions(): PlanOption[] {
       'monthly',
       'ultimate_monthly',
       'Ultimate Monthly',
-      'All 13 personas and the highest message allowance.',
-      [`${PLAN_CONFIG.ultimate.limit} messages every ${PLAN_CONFIG.ultimate.refreshMs / (60 * 60 * 1000)} hours`, 'All 13 AI personas'],
+      'All 8 personas and the highest message allowance.',
+      [`${PLAN_CONFIG.ultimate.limit} messages every ${PLAN_CONFIG.ultimate.refreshMs / (60 * 60 * 1000)} hours`, 'All 8 AI personas'],
       true
     ),
     deal(
@@ -253,7 +245,7 @@ export function getPlanOptions(): PlanOption[] {
       'ultimate_yearly',
       'Ultimate Yearly',
       'Everything in Ultimate, billed yearly.',
-      [`${PLAN_CONFIG.ultimate.limit} messages every ${PLAN_CONFIG.ultimate.refreshMs / (60 * 60 * 1000)} hours`, 'All 13 AI personas', 'Best value'],
+      [`${PLAN_CONFIG.ultimate.limit} messages every ${PLAN_CONFIG.ultimate.refreshMs / (60 * 60 * 1000)} hours`, 'All 8 AI personas', 'Best value'],
       false
     ),
   ];
