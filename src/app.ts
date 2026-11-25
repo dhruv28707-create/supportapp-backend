@@ -13,7 +13,7 @@ import { deleteAccountHandler } from './routes/accountDelete';
 import { diagnoseHandler } from './routes/diagnose';
 import { trialStartHandler } from './routes/trialStart';
 import { plansHandler } from './routes/plans';
-import { appConfigHandler } from './routes/appconfig';
+import { appConfigHandler } from './routes/appConfig';
 import { developerRouter } from './routes/developer';
 import { vercelLogDrainHandler } from './routes/vercelLogDrain';
 import { MAX_RAW_BODY_BYTES as MAX_DRAIN_RAW_BODY_BYTES } from './routes/vercelLogDrain';
