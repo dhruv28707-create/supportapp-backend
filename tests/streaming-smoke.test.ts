@@ -36,7 +36,7 @@ describe('streaming smoke', () => {
       .post('/api/chat?stream=1')
       .set(authHeader())
       .set('Accept', 'text/event-stream')
-      .send({ message: 'hi', personality: 'Friend' });
+      .send({ message: 'hi', personality: 'Father' });
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('text/event-stream');
     expect(res.text).toContain('"token":"hel"');
@@ -82,7 +82,7 @@ describe('streaming smoke', () => {
     const res = await request(app)
       .post('/api/chat?stream=1')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Friend' });
+      .send({ message: 'hi', personality: 'Father' });
     expect(res.status).toBe(200);
     expect(res.text).toContain('ai_upstream_error');
   });

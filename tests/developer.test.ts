@@ -99,7 +99,7 @@ describe('developer premium access', () => {
     const chat = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Wife' });
+      .send({ message: 'hi', personality: 'Guide' });
 
     expect(chat.status).toBe(200);
     expect(chat.body.reply).toBe('hello');
@@ -115,7 +115,7 @@ describe('developer premium access', () => {
     const chat = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Wife' });
+      .send({ message: 'hi', personality: 'Guide' });
 
     expect(chat.status).toBe(200);
     expect(mockDb.get('subscriptions/u1')).toBeUndefined();
@@ -143,7 +143,7 @@ describe('developer premium access', () => {
     const chat = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Wife' });
+      .send({ message: 'hi', personality: 'Guide' });
     expect(chat.status).toBe(200);
   });
 
@@ -154,7 +154,7 @@ describe('developer premium access', () => {
     const chat = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Wife' });
+      .send({ message: 'hi', personality: 'Guide' });
 
     expect(chat.status).toBe(403);
     expect(chat.body.code).toBe('persona_locked');
@@ -343,11 +343,11 @@ describe('developer logs API', () => {
     await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'one', personality: 'Friend' });
+      .send({ message: 'one', personality: 'Father' });
     await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'two', personality: 'Wife' });
+      .send({ message: 'two', personality: 'Guide' });
 
     const all = await request(app).get('/api/developer/logs').set(authHeader());
     expect(all.status).toBe(200);
@@ -356,8 +356,8 @@ describe('developer logs API', () => {
     );
     expect(replyEvents.length).toBe(2);
     // Newest first: the second chat must come before the first.
-    expect(replyEvents[0].detail.personality).toBe('Wife');
-    expect(replyEvents[1].detail.personality).toBe('Friend');
+    expect(replyEvents[0].detail.personality).toBe('Guide');
+    expect(replyEvents[1].detail.personality).toBe('Father');
     // Never log the user's message content.
     expect(all.body.logs.some((log: { detail?: { replyLength?: number } }) =>
       log.detail && typeof log.detail.replyLength === 'number'
@@ -389,7 +389,7 @@ describe('developer logs API', () => {
       await request(app)
         .post('/api/chat')
         .set(authHeader())
-        .send({ message, personality: 'Friend' });
+        .send({ message, personality: 'Father' });
     }
 
     const page1 = await request(app)

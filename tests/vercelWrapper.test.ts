@@ -42,7 +42,7 @@ function makeReq() {
       'x-forwarded-for': '1.2.3.4',
       authorization: 'Bearer valid-id-token',
     },
-    body: { message: 'hi', personality: 'Friend' },
+    body: { message: 'hi', personality: 'Father' },
     socket,
     ip: '1.2.3.4',
     user: undefined,

@@ -66,10 +66,10 @@ describe('POST /api/trial/start', () => {
     const chat = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Girlfriend' });
+      .send({ message: 'hi', personality: 'Guide' });
 
     expect(chat.status).toBe(200);
-    expect(chat.body.personality).toBe('Girlfriend');
+    expect(chat.body.personality).toBe('Guide');
   });
 
   it('refuses a second trial (one per account, ever)', async () => {

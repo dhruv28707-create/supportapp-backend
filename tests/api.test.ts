@@ -46,7 +46,7 @@ describe('Chat endpoints (the 404 regression)', () => {
     const res = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'feeling low', personality: 'Friend' });
+      .send({ message: 'feeling low', personality: 'Father' });
 
     expect(res.status).toBe(200);
     expect(res.body.reply).toBe('hey');
@@ -85,7 +85,7 @@ describe('Chat endpoints (the 404 regression)', () => {
       .set(authHeader())
       .send({
         message: 'What colour did I say?',
-        personality: 'Friend',
+        personality: 'Father',
         messages: [
           { role: 'user', content: 'My favourite colour is blue.' },
           { role: 'assistant', content: 'Blue suits you.' },
@@ -140,7 +140,7 @@ describe('Chat endpoints (the 404 regression)', () => {
     const res = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hello', personality: 'Friend' });
+      .send({ message: 'hello', personality: 'Father' });
 
     expect(res.status).toBe(429);
     expect(res.body.limitReached).toBe(true);
@@ -164,7 +164,7 @@ describe('Chat endpoints (the 404 regression)', () => {
     const res = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Friend' });
+      .send({ message: 'hi', personality: 'Father' });
 
     expect(res.status).toBe(200);
     expect(res.body.reply).toBe('from groq');
@@ -184,7 +184,7 @@ describe('Chat endpoints (the 404 regression)', () => {
     const res = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'are you there', personality: 'Friend' });
+      .send({ message: 'are you there', personality: 'Father' });
     const elapsed = Date.now() - started;
 
     expect(res.status).toBe(200);
@@ -199,10 +199,11 @@ describe('Chat endpoints (the 404 regression)', () => {
     const res = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Girlfriend' });
+      .send({ message: 'hi', personality: 'Mentor' });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('persona_locked');
+    expect(res.body.requiredPlan).toBe('pro');
     expect(mockFetch).not.toHaveBeenCalled();
     expect(mockDb.get('subscriptions/u1')).toBeUndefined();
   });
@@ -225,24 +226,74 @@ describe('Chat endpoints (the 404 regression)', () => {
       .post('/api/chat')
       .set(authHeader())
       .send({ message: 'hi', personality: 'BestFriend' });
-    expect(alias.status).toBe(200);
+    // 'BestFriend' coerces to 'Best Friend' (a Pro persona) — the 403 naming
+    // the canonical persona proves the alias was resolved before gating.
+    expect(alias.status).toBe(403);
+    expect(alias.body.code).toBe('persona_locked');
     expect(alias.body.personality).toBe('Best Friend');
 
-    // 'BF' coerces to Boyfriend (locked on free) — 403 proves coercion ran.
-    const bf = await request(app)
+    // Removed personas (incl. the old BF/GF shorthands) get a clear
+    // "please update" 400 that old app builds show as-is.
+    const retired = await request(app)
       .post('/api/chat')
       .set(authHeader())
       .send({ message: 'hi', personality: 'BF' });
-    expect(bf.status).toBe(403);
-    expect(bf.body.code).toBe('persona_locked');
-    expect(bf.body.personality).toBe('Boyfriend');
+    expect(retired.status).toBe(400);
+    expect(retired.body.code).toBe('persona_retired');
+    expect(retired.body.error).toContain('update the app');
 
     // 'muslim' is accepted as 'islamic'.
     const muslim = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Friend', religionSubType: 'muslim' });
+      .send({ message: 'hi', personality: 'Father', religionSubType: 'muslim' });
     expect(muslim.status).toBe(200);
+  });
+
+  it('answers with a free persona when none is sent (default never hits the plan gate)', async () => {
+    primeAuth('u1');
+    mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'hi' } }] }));
+    const res = await request(app).post('/api/chat').set(authHeader()).send({ message: 'hello' });
+    expect(res.status).toBe(200);
+    expect(res.body.personality).toBe('Father');
+  });
+
+  it.each(['Friend', 'Husband', 'Wife', 'Boyfriend', 'Girlfriend', 'BF', 'GF'])(
+    'rejects the removed persona %s with a clear update message',
+    async (removed) => {
+      primeAuth('u1');
+      const res = await request(app)
+        .post('/api/chat')
+        .set(authHeader())
+        .send({ message: 'hi', personality: removed });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('persona_retired');
+      expect(mockFetch).not.toHaveBeenCalled();
+    }
+  );
+
+  it('enforces the plan tiers: free < Pro < Ultimate', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'hi' } }] }));
+    const seed = (plan: string) =>
+      mockDb.collection('subscriptions').doc('u1').set(
+        { plan, messageCount: 0, lastResetAt: Date.now(), expiresAt: plan === 'free' ? null : Date.now() + 86400000 },
+        { merge: false }
+      );
+    const status = async (personality: string) =>
+      (await request(app).post('/api/chat').set(authHeader()).send({ message: 'hi', personality })).status;
+
+    const expected: Record<string, Record<string, number>> = {
+      free: { Father: 200, Mother: 200, Sister: 200, Brother: 200, 'Best Friend': 403, Mentor: 403, Guide: 403, Stranger: 403 },
+      pro: { Father: 200, Mother: 200, Sister: 200, Brother: 200, 'Best Friend': 200, Mentor: 200, Guide: 403, Stranger: 403 },
+      ultimate: { Father: 200, Mother: 200, Sister: 200, Brother: 200, 'Best Friend': 200, Mentor: 200, Guide: 200, Stranger: 200 },
+    };
+    for (const plan of ['free', 'pro', 'ultimate']) {
+      primeAuth('u1');
+      seed(plan);
+      for (const [persona, want] of Object.entries(expected[plan])) {
+        expect(await status(persona), `${plan} -> ${persona}`).toBe(want);
+      }
+    }
   });
 
   it('rejects messages over 2000 characters', async () => {
@@ -250,7 +301,7 @@ describe('Chat endpoints (the 404 regression)', () => {
     const res = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'x'.repeat(2001), personality: 'Friend' });
+      .send({ message: 'x'.repeat(2001), personality: 'Father' });
     expect(res.status).toBe(400);
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -567,3 +618,22 @@ describe('DELETE /api/account', () => {
 async function spyAuth() {
   return { revokeUserTokensSpy: mockAuth.revokeRefreshTokens };
 }
+
+describe('GET /api/app-config', () => {
+  it('is public and reports "no update needed" until build numbers are configured', async () => {
+    const res = await request(app).get('/api/app-config');
+    expect(res.status).toBe(200);
+    expect(res.body.minVersionCode).toBe(0);
+    expect(res.body.latestVersionCode).toBe(0);
+    expect(res.body.storeUrls.android).toContain('play.google.com');
+  });
+
+  it('reads min/latest build numbers from the environment', async () => {
+    vi.stubEnv('APP_MIN_VERSION_CODE', '7');
+    vi.stubEnv('APP_LATEST_VERSION_CODE', '9');
+    const res = await request(app).get('/api/app-config');
+    expect(res.body.minVersionCode).toBe(7);
+    expect(res.body.latestVersionCode).toBe(9);
+    vi.unstubAllEnvs();
+  });
+});

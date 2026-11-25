@@ -1,6 +1,6 @@
 # SAFESPACE Backend
 
-Backend for **SAFESPACE** — an emotional support chat app with 13 AI personalities, optional spiritual guidance overlays, and Razorpay-powered subscriptions (freemium).
+Backend for **SAFESPACE** — an emotional support chat app with 8 AI personalities, optional spiritual guidance overlays, and Razorpay-powered subscriptions (freemium).
 
 - **Runtime:** Node.js >= 18 (uses native `fetch`), TypeScript (strict)
 - **Hosting:** Vercel serverless functions (`api/`) — the same handlers also run as an Express app (`src/index.ts`) for local/self-hosted use
@@ -68,10 +68,10 @@ Request body:
 | Field | Rules |
 |---|---|
 | `message` | Required string, 1–2000 chars. Send recent `messages: [{ role: "user" | "assistant", content }]` with it to preserve conversation context. The backend forwards the newest 16 messages / 12,000 characters at most, and always appends `message` as the current user turn. |
-| `personality` | Optional. One of `Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`, `Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`, `Stranger`. Omitted → defaults to `Friend`. Legacy shorthands (`BestFriend`, `BF`, `GF`) are coerced server-side; anything else invalid → **400** with the list of valid options. `Guide_<religion>` (e.g. `Guide_hindu`) is accepted as an alias for `personality: "Guide"` + `religionSubType` |
+| `personality` | Optional. One of `Father`, `Mother`, `Sister`, `Brother`, `Best Friend`, `Mentor`, `Guide`, `Stranger`. Omitted → defaults to `Father` (a free persona). The legacy shorthand `BestFriend` is coerced server-side. Removed personas (`Friend`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`, `BF`, `GF`) → **400** `{ code: 'persona_retired' }` with an "update the app" message; anything else invalid → **400** with the list of valid options. `Guide_<religion>` (e.g. `Guide_hindu`) is accepted as an alias for `personality: "Guide"` + `religionSubType` |
 | `religionSubType` | Optional. Only used when `personality` is `Guide`. One of `islamic`, `hindu`, `christian`, `buddhist`, `jewish`, `spiritual`, `secular` (`muslim` is accepted as `islamic`). Invalid value → 400. |
 
-**Persona gating is enforced server-side.** Free plans can use the family & friend personas (`Father`, `Mother`, `Sister`, `Brother`, `Friend`, `Best Friend`); the rest (`Mentor`, `Guide`, `Husband`, `Wife`, `Boyfriend`, `Girlfriend`) require an active pro/ultimate plan. A locked persona returns **403** `{ code: 'persona_locked', plan, personality }` and consumes no quota. The frontend's UI locks are cosmetic only.
+**Persona gating is enforced server-side.** Each persona has a minimum plan: **free** = `Father`, `Mother`, `Sister`, `Brother`; **Pro** adds `Best Friend`, `Mentor`; **Ultimate** adds `Guide`, `Stranger`. A locked persona returns **403** `{ code: 'persona_locked', plan, personality, requiredPlan }` and consumes no quota. The frontend's UI locks are cosmetic only.
 
 Success response:
 
@@ -135,6 +135,16 @@ Plan limits (`src/constants.ts`): free 20 msgs / 5h · pro 80 / 4h · ultimate 2
 
 Same plan/quota data as `GET /api/user/plan` (which is kept for older clients), plus `uiHints` telling the app to surface quota only on the Usage screen. **Auth required.** New clients should prefer this endpoint.
 
+### GET /api/app-config
+
+Public (no auth). Powers the in-app "Update the app" popup.
+
+```json
+{ "minVersionCode": 0, "latestVersionCode": 0, "storeUrls": { "android": "https://play.google.com/store/apps/details?id=com.supportapp", "ios": null } }
+```
+
+Set on Vercel: `APP_MIN_VERSION_CODE` (builds below it are blocked until updated), `APP_LATEST_VERSION_CODE` (builds below it get a dismissible nudge), `APP_STORE_URL_ANDROID` / `APP_STORE_URL_IOS`. Both build numbers default to `0` (no popup). Only raise the minimum once the new build is live on the store.
+
 ### GET /api/plans
 
 Public pricing catalog for the post-trial choice cards. No auth.
@@ -182,7 +192,7 @@ Errors:
 | 409 | `{ code: 'trial_already_used' }` — this account already trialed |
 | 409 | `{ code: 'already_subscribed' }` — account already has a paid plan |
 
-Behavior: during the trial the user gets full Ultimate perks (all 13 personas, 200 msgs / 2h). When the 5 days end, the existing expiry downgrade returns them to `free`; the app then shows the `/api/plans` choice cards (free / pro / ultimate, monthly / yearly). A trial **never blocks `DELETE /api/account`**, and `POST /api/payment-cancel` ends it early (immediate downgrade). Buying an Ultimate tier at any point replaces the trial and keeps `trialUsed` set, so a trial can never be restarted.
+Behavior: during the trial the user gets full Ultimate perks (all 8 personas, 200 msgs / 2h). When the 5 days end, the existing expiry downgrade returns them to `free`; the app then shows the `/api/plans` choice cards (free / pro / ultimate, monthly / yearly). A trial **never blocks `DELETE /api/account`**, and `POST /api/payment-cancel` ends it early (immediate downgrade). Buying an Ultimate tier at any point replaces the trial and keeps `trialUsed` set, so a trial can never be restarted.
 
 **The one-trial guarantee is churn-proof:** the flag is also recorded in a server-only `trialGuards` collection (one doc keyed by uid, one keyed by hashed email) that deliberately survives `DELETE /api/account` — so deleting the account and re-signing up with the same email can never restart the trial. The trial grant writes the guards transactionally, and a refusal backfills them for accounts that predate the ledger. Message quota is likewise a hard cap: consumes within the last 10 messages of the plan limit run transactionally with a fresh in-transaction read, so a concurrent burst cannot overshoot the limit.
 

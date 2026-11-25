@@ -10,9 +10,34 @@ beforeEach(() => {
   resetAll();
 });
 
+const seedPlan = (plan: 'free' | 'pro' | 'ultimate') =>
+  mockDb.collection('subscriptions').doc('u1').set(
+    {
+      plan,
+      messageCount: 0,
+      lastResetAt: Date.now(),
+      expiresAt: plan === 'free' ? null : Date.now() + 86400000,
+    },
+    { merge: false }
+  );
+
 describe('Stranger personality', () => {
-  it('is allowed on free plans with anonymity + no-history flags', async () => {
+  it.each(['free', 'pro'] as const)('is locked on the %s plan (Ultimate only)', async (plan) => {
     primeAuth('u1');
+    seedPlan(plan);
+    const res = await request(app)
+      .post('/api/chat')
+      .set(authHeader())
+      .send({ message: 'just need to vent', personality: 'Stranger' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('persona_locked');
+    expect(res.body.requiredPlan).toBe('ultimate');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('is allowed on the Ultimate plan with anonymity + no-history flags', async () => {
+    primeAuth('u1');
+    seedPlan('ultimate');
     mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'hey, im listening' } }] }));
 
     const res = await request(app)
@@ -32,6 +57,7 @@ describe('Stranger personality', () => {
 
   it('ignores religionSubType for Stranger instead of 400', async () => {
     primeAuth('u1');
+    seedPlan('ultimate');
     mockFetch.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }));
 
     const res = await request(app)

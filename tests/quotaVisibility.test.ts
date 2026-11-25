@@ -53,7 +53,7 @@ describe('quota refill visibility (75% rule)', () => {
     const chat = await request(app)
       .post('/api/chat')
       .set(authHeader())
-      .send({ message: 'hi', personality: 'Friend' });
+      .send({ message: 'hi', personality: 'Father' });
     expect(chat.status).toBe(429);
     expect(chat.body.limitReached).toBe(true);
     expect(chat.body.showRefillTimer).toBe(true);

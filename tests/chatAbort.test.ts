@@ -32,7 +32,7 @@ class FakeResponse extends EventEmitter {
 function makeServerlessRequest(socket: EventEmitter) {
   return {
     user: { uid: 'u1', email: 'u1@test.dev' },
-    body: { message: 'hi', personality: 'Friend' },
+    body: { message: 'hi', personality: 'Father' },
     headers: { 'x-forwarded-for': '1.2.3.4' },
     socket,
     ip: '1.2.3.4',
