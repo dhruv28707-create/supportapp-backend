@@ -21,19 +21,37 @@ export const PERSONALITIES = [
 
 export type PersonalityType = (typeof PERSONALITIES)[number];
 
+/** Rank of each plan: a higher plan unlocks everything a lower one does. */
+const PLAN_RANK: Record<PlanType, number> = { free: 0, pro: 1, ultimate: 2 };
+
 /**
  * Plan-based persona gating, enforced server-side in the chat handler.
- * Family + friend personas are free; the rest need a paid plan. Stranger
- * stays free on every plan (anonymous, no history).
+ * Each persona lists the LOWEST plan that unlocks it:
+ *  - free:     Father, Mother, Sister, Brother
+ *  - pro:      + Best Friend, Mentor
+ *  - ultimate: + Guide, Stranger (all 8)
+ * Keep this in sync with TIER_UNLOCKS in the frontend constants.
  */
-export const FREE_PERSONALITIES: readonly string[] = [
-  'Father',
-  'Mother',
-  'Sister',
-  'Brother',
-  'Best Friend',
-  'Stranger',
-];
+export const PERSONALITY_MIN_PLAN: Record<PersonalityType, PlanType> = {
+  Father: 'free',
+  Mother: 'free',
+  Sister: 'free',
+  Brother: 'free',
+  'Best Friend': 'pro',
+  Mentor: 'pro',
+  Guide: 'ultimate',
+  Stranger: 'ultimate',
+};
+
+/** Personas available on the free plan (derived from PERSONALITY_MIN_PLAN). */
+export const FREE_PERSONALITIES: readonly string[] = PERSONALITIES.filter(
+  (p) => PERSONALITY_MIN_PLAN[p] === 'free'
+);
+
+/** Lowest plan that unlocks `personality`, or null for an unknown persona. */
+export function getRequiredPlan(personality: string): PlanType | null {
+  return (PERSONALITY_MIN_PLAN as Record<string, PlanType | undefined>)[personality] ?? null;
+}
 
 /**
  * The anonymous listener persona. Replies carry `storeHistory: false` and
@@ -46,8 +64,9 @@ export function isStrangerPersonality(personality: string): boolean {
 }
 
 export function isPersonalityAllowed(plan: PlanType, personality: string): boolean {
-  if (plan !== DEFAULT_PLAN) return true; // every paid plan unlocks all personas
-  return FREE_PERSONALITIES.includes(personality);
+  const required = getRequiredPlan(personality);
+  if (!required) return false; // unknown persona
+  return PLAN_RANK[plan] >= PLAN_RANK[required];
 }
 
 /**
@@ -58,6 +77,30 @@ export function isPersonalityAllowed(plan: PlanType, personality: string): boole
 export const PERSONALITY_ALIASES: Record<string, string> = {
   BestFriend: 'Best Friend',
 };
+
+/**
+ * Personas that were removed from the app. Old app builds may still send
+ * them, so the chat handler answers with a clear "please update" error
+ * instead of the generic "Invalid personality" list. Display name per key
+ * ('BF' / 'GF' were legacy shorthands).
+ */
+const RETIRED_PERSONALITY_LABELS: Record<string, string> = {
+  Friend: 'Friend',
+  Husband: 'Husband',
+  Wife: 'Wife',
+  Boyfriend: 'Boyfriend',
+  Girlfriend: 'Girlfriend',
+  BF: 'Boyfriend',
+  GF: 'Girlfriend',
+};
+
+/** Display name of a removed persona, or null when `value` is not one. */
+export function getRetiredPersonalityLabel(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return Object.prototype.hasOwnProperty.call(RETIRED_PERSONALITY_LABELS, value)
+    ? RETIRED_PERSONALITY_LABELS[value]
+    : null;
+}
 
 /**
  * Religion subtype aliases, applied after lowercasing: 'muslim' is accepted
@@ -209,7 +252,7 @@ export function getPlanOptions(): PlanOption[] {
       null,
       'Free',
       'Keep chatting on the house. No card, no commitment.',
-      [`${PLAN_CONFIG.free.limit} messages every ${PLAN_CONFIG.free.refreshMs / (60 * 60 * 1000)} hours`, 'Family & friend personas'],
+      [`${PLAN_CONFIG.free.limit} messages every ${PLAN_CONFIG.free.refreshMs / (60 * 60 * 1000)} hours`, 'Father, Mother, Sister & Brother'],
       false
     ),
     deal(
@@ -217,8 +260,8 @@ export function getPlanOptions(): PlanOption[] {
       'monthly',
       'pro_monthly',
       'Pro Monthly',
-      'More room to talk, with every persona unlocked.',
-      [`${PLAN_CONFIG.pro.limit} messages every ${PLAN_CONFIG.pro.refreshMs / (60 * 60 * 1000)} hours`, 'All 8 AI personas'],
+      'More room to talk, with Best Friend and Mentor unlocked.',
+      [`${PLAN_CONFIG.pro.limit} messages every ${PLAN_CONFIG.pro.refreshMs / (60 * 60 * 1000)} hours`, 'Best Friend & Mentor personas'],
       false
     ),
     deal(
@@ -227,7 +270,7 @@ export function getPlanOptions(): PlanOption[] {
       'pro_yearly',
       'Pro Yearly',
       'Everything in Pro, billed yearly.',
-      [`${PLAN_CONFIG.pro.limit} messages every ${PLAN_CONFIG.pro.refreshMs / (60 * 60 * 1000)} hours`, 'All 8 AI personas', 'Best value'],
+      [`${PLAN_CONFIG.pro.limit} messages every ${PLAN_CONFIG.pro.refreshMs / (60 * 60 * 1000)} hours`, 'Best Friend & Mentor personas', 'Best value'],
       false
     ),
     deal(

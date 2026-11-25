@@ -13,6 +13,7 @@ import { deleteAccountHandler } from './routes/accountDelete';
 import { diagnoseHandler } from './routes/diagnose';
 import { trialStartHandler } from './routes/trialStart';
 import { plansHandler } from './routes/plans';
+import { appConfigHandler } from './routes/appconfig';
 import { developerRouter } from './routes/developer';
 import { vercelLogDrainHandler } from './routes/vercelLogDrain';
 import { MAX_RAW_BODY_BYTES as MAX_DRAIN_RAW_BODY_BYTES } from './routes/vercelLogDrain';
@@ -113,6 +114,9 @@ export function createApp(): express.Express {
   app.get('/api/diagnose', diagnoseHandler);
 
   app.get('/api/plans', plansHandler);
+
+  // Public: min/latest app build numbers for the in-app update popup.
+  app.get('/api/app-config', appConfigHandler);
 
   // Read-only developer/admin API. Every route inside is gated by
   // requireDeveloper (signed claim / env allowlist / protected Firestore flag).

@@ -9,6 +9,8 @@ import {
   CHAT_FALLBACK_STAGGER_MS,
   PLAN_CONFIG,
   isPersonalityAllowed,
+  getRequiredPlan,
+  getRetiredPersonalityLabel,
   isStrangerPersonality,
   PlanType,
   getQuotaUsageFraction,
@@ -624,10 +626,11 @@ async function handleChatSend(
     return;
   }
 
-  // Personality: omitted defaults to Best Friend; explicitly invalid is rejected.
+  // Personality: omitted defaults to Father (a FREE persona, so a request
+  // without one never hits the plan gate); explicitly invalid is rejected.
   // Legacy shorthand BestFriend is coerced so old app versions and stored
   // values keep working. "Guide_<religion>" selects Guide with that overlay.
-  let personality: PersonalityType = 'Best Friend';
+  let personality: PersonalityType = 'Father';
   let religionSubType: string | undefined =
     typeof body.religionSubType === 'string' ? body.religionSubType : undefined;
 
@@ -639,6 +642,17 @@ async function handleChatSend(
     typeof requestedPersonality === 'string' && requestedPersonality.startsWith('Guide_')
       ? requestedPersonality
       : null;
+
+  // Removed personas (old app builds may still send them): a clear
+  // "please update" message that old builds show as-is in the chat.
+  const retiredLabel = getRetiredPersonalityLabel(requestedPersonality);
+  if (retiredLabel) {
+    sendJson(res, 400, {
+      error: `The ${retiredLabel} persona is no longer available. Please update the app to the latest version.`,
+      code: 'persona_retired',
+    });
+    return;
+  }
 
   if (requestedPersonality !== undefined && !guideAlias) {
     if (
@@ -694,11 +708,14 @@ async function handleChatSend(
   const plan: PlanType = planState.plan;
   const tPlan = Date.now();
   if (!isPersonalityAllowed(plan, personality)) {
+    const requiredPlan = getRequiredPlan(personality) ?? 'pro';
+    const requiredLabel = requiredPlan === 'ultimate' ? 'Ultimate' : 'Pro';
     sendJson(res, 403, {
-      error: `The ${personality} personality requires a paid plan. Upgrade to unlock it.`,
+      error: `The ${personality} personality requires the ${requiredLabel} plan. Upgrade to unlock it.`,
       code: 'persona_locked',
       plan,
       personality,
+      requiredPlan,
     });
     return;
   }

@@ -68,9 +68,9 @@ const FAITH_BOUNDARY_RULE = `Stay within the selected faith tradition. Do not re
 export function buildSystemPrompt(personality: string, religionSubType?: string): string {
   const normalizedPersonality = PERSONALITIES.includes(personality as Personality)
     ? personality
-    : 'Best Friend';
+    : 'Father';
 
-  let prompt = BASE_PROMPTS[normalizedPersonality as Personality] || BASE_PROMPTS['Best Friend'];
+  let prompt = BASE_PROMPTS[normalizedPersonality as Personality] || BASE_PROMPTS.Father;
 
   prompt += `\n\n${HUMAN_RULES}`;
 
